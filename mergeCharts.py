@@ -8,7 +8,7 @@ import mido
 # ======================================
 # CONFIG
 # ======================================
-ROOT_FOLDER = Path(r"C:\Users\andre\Documents\CHARTS")
+ROOT_FOLDER = Path(r"C:\Users\yourname\Documents\YourFolder")
 ROOT_FOLDER.mkdir(exist_ok=True)
 
 # ======================================
@@ -364,3 +364,4 @@ if __name__ == "__main__":
     print(c("⚡ FNF MULTITOOL — Streamlined Edition ⚡", Color.YELLOW))
     print(c("Note: Player/Opponent lanes fixed automatically.\n", Color.GREEN))
     menu()
+
