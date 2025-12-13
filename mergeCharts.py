@@ -1,34 +1,42 @@
 import json
-import os
 import copy
 import time
 from pathlib import Path
-import mido
 
-# ======================================
-# CONFIG
-# ======================================
-ROOT_FOLDER = Path(r"C:\Users\andre\Documents\CHARTS")
-ROOT_FOLDER.mkdir(exist_ok=True)
+try:
+    from pydub import AudioSegment
+    import numpy as np
+    AUDIO_SUPPORT = True
+except ImportError:
+    AUDIO_SUPPORT = False
 
-# ======================================
-# COLORS (for console output)
-# ======================================
+# =========================
+# UTILITIES
+# =========================
 class Color:
-    GREEN = "\033[92m"
-    RED = "\033[91m"
-    YELLOW = "\033[93m"
-    MAGENTA = "\033[95m"
-    RESET = "\033[0m"
+    GREEN = '\033[92m'
+    RED = '\033[91m'
+    MAGENTA = '\033[95m'
+    YELLOW = '\033[93m'
+    RESET = '\033[0m'
 
 def c(text, color=Color.RESET):
     return f"{color}{text}{Color.RESET}"
 
-# ======================================
-# PATH UTILITIES
-# ======================================
+def elapsed_fmt(seconds):
+    return f"{seconds:.2f}s"
+
+def timer(func):
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        print(c(f"\nStarting: {func.__name__}", Color.MAGENTA))
+        res = func(*args, **kwargs)
+        end = time.time()
+        print(c(f"Completed: {func.__name__} in {elapsed_fmt(end-start)}", Color.GREEN))
+        return res
+    return wrapper
+
 def clean_path(path: str) -> str:
-    """Removes quotes and whitespace"""
     return path.strip().strip('"').strip("'")
 
 def make_folder(name: str) -> Path:
@@ -39,391 +47,248 @@ def make_folder(name: str) -> Path:
 def compress_json(data):
     return json.dumps(data, separators=(",", ":"))
 
-# ======================================
-# FIX NOTE SIDES (Script 2 feature)
-# ======================================
-def fix_note_side(note):
-    """
-    Ensures player notes go on lanes 4-7, opponent on 0-3.
+# =========================
+# CONFIG
+# =========================
+ROOT_FOLDER = Path(r"C:\Users\andre\Documents\CHARTS")
+ROOT_FOLDER.mkdir(exist_ok=True)
 
-    Supports both:
-      - list/tuple notes (e.g. [time, lane, length, mustPress, ...extra...])
-      - dict-style notes (e.g. {"time":..., "lane":..., "mustPress":...})
+# =========================
+# MENU
+# =========================
+def show_menu():
+    print("\n========================================")
+    print("FNF MULTITASK TOOL")
+    print("========================================")
+    print("0: Append Notes to Empty Sections")
+    print("1: Merge Charts")
+    print("2: Split Chart")
+    print("3: Multiply Notes (Fast & Compressed)")
+    print("4: Ultra-Compress JSON")
+    print("5: NPS Fill")
+    print("6: Load Large Charts (sorted)")
+    print("7: MIDI to FNF Chart")
+    print("8: Dynamic Note Multiplier")
+    print("9: Multi-Pass JSON Compression")
+    print("10: Audio to FNF Chart")
+    print("Q: Quit")
+    return input("Choose an option (0-10/Q): ").strip().upper()
 
-    Preserves extra metadata (keeps fields after index 3 for lists).
-    """
-    # --- Dict-style notes ---
-    if isinstance(note, dict):
-        # try several possible names for mustPress and lane
-        mp_key = None
-        for k in ("mustPress", "mustHitSection", "mp", "mustpress"):
-            if k in note:
-                mp_key = k
-                break
+# =========================
+# FUNCTIONS
+# =========================
 
-        lane_key = None
-        for k in ("lane", "direction", "note"):
-            if k in note:
-                lane_key = k
-                break
+@timer
+def append_notes():
+    path = Path(clean_path(input("Enter path to JSON file: ")))
+    if not path.exists():
+        print(c(f"❌ File not found: {path}", Color.RED))
+        return
+    folder_path = make_folder("AppendNotes_Folder")
+    with path.open("r", encoding="utf-8") as f:
+        chart = json.load(f)
 
-        # if we don't have a lane key, we can't fix anything
-        if lane_key is None:
-            return note
+    all_notes = []
+    for section in chart["song"]["notes"]:
+        all_notes.extend(copy.deepcopy(section.get("sectionNotes", [])))
 
-        lane = note[lane_key]
+    empty_sections = [s for s in chart["song"]["notes"] if not s.get("sectionNotes")]
+    for section in empty_sections:
+        section["sectionNotes"] = copy.deepcopy(all_notes)
 
-        # normalize mustPress value (if present)
-        mp_val = None
-        if mp_key is not None:
-            mp_val = note.get(mp_key)
+    new_file = folder_path / f"{path.stem}_appended.json"
+    with new_file.open("w", encoding="utf-8") as f:
+        json.dump(chart, f, indent=4)
 
-        if isinstance(mp_val, bool):
-            mp_int = 1 if mp_val else 0
-        else:
-            try:
-                mp_int = int(mp_val) if mp_val is not None else None
-            except Exception:
-                mp_int = None
-
-        if mp_int == 1:  # player
-            note[lane_key] = (lane % 4) + 4
-            if mp_key is not None:
-                note[mp_key] = 1
-        elif mp_int == 0:  # opponent
-            note[lane_key] = lane % 4
-            if mp_key is not None:
-                note[mp_key] = 0
-        # if mp unknown, leave lane as-is
-        return note
-
-    # --- list/tuple-style notes ---
-    if isinstance(note, (list, tuple)):
-        if len(note) < 4:
-            return note  # can't reliably interpret
-
-        time_ = note[0]
-        lane = note[1]
-        length = note[2]
-        mp = note[3]
-
-        # Normalize mustPress
-        if isinstance(mp, bool):
-            mp = 1 if mp else 0
-        else:
-            try:
-                mp = int(mp)
-            except Exception:
-                mp = 0
-
-        if mp == 1:  # Player
-            lane = (lane % 4) + 4
-        else:        # Opponent or unknown treated as opponent
-            lane = lane % 4
-
-        # preserve any extra fields after the 4th item
-        extra = list(note[4:]) if len(note) > 4 else []
-        return [time_, lane, length, mp, *extra]
-
-    # Unknown note format: return as-is (safe)
-    return note
-
-# ======================================
-# TIMER DECORATOR
-# ======================================
-def timer(func):
-    def wrapper(*a, **k):
-        start = time.time()
-        print(c(f"\nStarted: {func.__name__}", Color.MAGENTA))
-        result = func(*a, **k)
-        end = time.time()
-        print(c(f"Completed in {end - start:.2f}s", Color.GREEN))
-        return result
-    return wrapper
-
-# ======================================
-# FEATURES
-# ======================================
+    print(f"✅ Appended notes to {len(empty_sections)} empty sections.")
+    print(f"Saved as {new_file}")
 
 @timer
 def merge_charts():
-    folder = make_folder("MERGED")
-    files = []
-
-    print("Enter chart paths one by one. Type 'stop' when done.")
+    file_paths = []
     while True:
-        p = clean_path(input("> "))
-        if p.lower() == "stop":
+        f = clean_path(input("Enter path of chart to merge (or 'stop'): "))
+        if f.lower() == "stop":
             break
-        fp = Path(p)
-        if fp.exists():
-            files.append(fp)
+        f_path = Path(f)
+        if not f_path.exists():
+            print(c(f"❌ File not found: {f}", Color.RED))
         else:
-            print(c("File not found!", Color.RED))
-
-    if not files:
-        print(c("No files to merge!", Color.RED))
+            file_paths.append(f_path)
+    if not file_paths:
+        print(c("❌ No valid files provided!", Color.RED))
         return
 
-    # Load first file
-    with files[0].open("r", encoding="utf-8") as f:
-        merged = json.load(f)
+    folder_path = make_folder("Merged_Folder")
+    output_name = input("Output filename (without .json): ").strip() or "merged_chart"
+    merged_chart = None
+    for idx, f in enumerate(file_paths):
+        with f.open("r", encoding="utf-8") as file:
+            chart = json.load(file)
+        if idx == 0:
+            merged_chart = copy.deepcopy(chart)
+        else:
+            merged_chart["song"]["notes"].extend(chart["song"].get("notes", []))
 
-    # Merge others
-    for fpath in files[1:]:
-        with fpath.open("r", encoding="utf-8") as f:
-            chart = json.load(f)
-
-        for sec in chart["song"]["notes"]:
-            new_sec = {"sectionNotes": []}
-            for note in sec.get("sectionNotes", []):
-                new_sec["sectionNotes"].append(fix_note_side(note))
-            merged["song"]["notes"].append(new_sec)
-
-    out_file = folder / "merged.json"
+    out_file = folder_path / f"{output_name}.json"
     with out_file.open("w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
+        json.dump(merged_chart, f, indent=4)
 
-    print(c("Merged successfully!", Color.GREEN))
-    print(f"Saved: {out_file}")
+    total_notes = sum(len(section["sectionNotes"]) for section in merged_chart["song"]["notes"])
+    print(f"✅ Merged {len(file_paths)} charts into {len(merged_chart['song']['notes'])} sections, {total_notes} notes.")
+    print(f"Saved in {folder_path}")
 
 @timer
 def split_chart():
-    path = Path(clean_path(input("Path to chart: ")))
+    path = Path(clean_path(input("Enter path to chart to split: ")))
     if not path.exists():
-        print(c("File not found!", Color.RED))
+        print(c(f"❌ File not found: {path}", Color.RED))
         return
+    folder_path = make_folder("Split_Folder")
+    output_name = input("Base filename (without .json): ").strip() or "split_chart"
 
     try:
-        parts = int(input("Number of splits: "))
-        if parts < 2:
+        splits = int(input("How many splits: ").strip())
+        if splits < 2:
             raise ValueError
     except ValueError:
-        print(c("Invalid number!", Color.RED))
+        print(c("❌ Please enter a valid number greater than 1!", Color.RED))
         return
 
     with path.open("r", encoding="utf-8") as f:
         base = json.load(f)
 
-    sections = base["song"]["notes"]
-    total = len(sections)
-    chunk = total // parts
+    total_sections = len(base["song"]["notes"])
+    if splits > total_sections:
+        splits = total_sections
 
-    folder = make_folder("SPLIT")
-
-    i = 0
+    chunk_size = total_sections // splits
+    remainder = total_sections % splits
     start = 0
-    while i < parts:
-        end = start + chunk
-        if i == parts - 1:
-            end = total
-
+    for i in range(splits):
+        end = start + chunk_size + (1 if i < remainder else 0)
         new_chart = copy.deepcopy(base)
-        new_chart["song"]["notes"] = sections[start:end]
-
-        # Normalize lanes/mustPress
-        for sec in new_chart["song"]["notes"]:
-            sec["sectionNotes"] = [fix_note_side(n) for n in sec.get("sectionNotes", [])]
-
-        out_file = folder / f"{path.stem}_part{i+1}.json"
-        with out_file.open("w", encoding="utf-8") as f:
-            json.dump(new_chart, f, indent=2)
-
-        print(f"Saved {out_file} ({end - start} sections)")
+        new_chart["song"]["notes"] = base["song"]["notes"][start:end]
+        output_file = folder_path / f"{output_name}-{i+1}.json"
+        with output_file.open("w", encoding="utf-8") as out:
+            json.dump(new_chart, out, indent=4)
+        print(f"{output_file}: {len(new_chart['song']['notes'])} sections")
         start = end
-        i += 1
+    print("✅ Done.")
 
+# =========================
+# FAST MULTIPLY WITH STREAMING COMPRESSION
+# =========================
 @timer
-def multiply_notes_streamed():
+def multiply_notes_compress():
     path = Path(clean_path(input("Enter path to chart: ")))
-
     if not path.exists():
-        print(c("File not found!", Color.RED))
+        print(c(f"❌ File not found: {path}", Color.RED))
         return
+    folder_path = make_folder("Multiply_Compress_Folder")
 
     try:
-        multiplier = int(input("Multiplier (max 2,000,000,000): ").strip())
+        multiplier = int(input("Enter multiplier (max 2,000,000,000): ").strip())
         if multiplier < 2:
             raise ValueError
     except ValueError:
-        print(c("Invalid multiplier!", Color.RED))
+        print(c("❌ Invalid multiplier!", Color.RED))
         return
 
-    folder = make_folder("MULTIPLIED")
-    out_file = folder / f"{path.stem}_x{multiplier}.json"
-
     with path.open("r", encoding="utf-8") as f:
-        base = json.load(f)
+        chart = json.load(f)
 
-    with out_file.open("w", encoding="utf-8") as out:
-        out.write('{"song":{')
+    out_file = folder_path / f"{path.stem}_multiplied_compressed.json"
 
-        for k, v in base["song"].items():
-            if k != "notes":
-                out.write(f'"{k}":{json.dumps(v)},')
-
-        out.write('"notes":[')
+    with out_file.open("w", encoding="utf-8") as f:
+        f.write('{"song":{')
+        f.write(f'"player1":"{chart["song"].get("player1","bf")}",')
+        f.write(f'"player2":"{chart["song"].get("player2","dad")}",')
+        f.write('"notes":[')
 
         first_section = True
-        total_notes_in = 0
-        total_notes_out = 0
-
-        for section in base["song"]["notes"]:
-            if not first_section:
-                out.write(",")
-            first_section = False
-
-            out.write('{"sectionNotes":[')
-
+        for section in chart["song"]["notes"]:
             notes = section.get("sectionNotes", [])
-            total_notes_in += len(notes)
+            if not notes:
+                continue
 
-            first_note = True
+            # Multiply in chunks to reduce memory usage
+            multiplied_notes = []
+            chunk = 10000
             for note in notes:
-                fixed = fix_note_side(note)
-                note_dump = json.dumps(fixed)
+                multiplied_notes.extend([note] * multiplier)
+                if len(multiplied_notes) >= chunk:
+                    # write partial JSON to reduce memory
+                    section_json = compress_json({"sectionNotes": multiplied_notes})
+                    if not first_section:
+                        f.write(',')
+                    f.write(section_json[1:-1])  # remove outer {}
+                    multiplied_notes = []
+                    first_section = False
 
-                for _ in range(multiplier):
-                    if not first_note:
-                        out.write(",")
-                    out.write(note_dump)
-                    first_note = False
-                    total_notes_out += 1
+            if multiplied_notes:
+                section_json = compress_json({"sectionNotes": multiplied_notes})
+                if not first_section:
+                    f.write(',')
+                f.write(section_json[1:-1])
+                first_section = False
 
-            out.write("]}")
+        f.write(']}}')
 
-        out.write("]}")
-        out.write("}")
+    print(f"✅ Done. Multiplied & compressed notes saved in {out_file}")
 
-    print(c("SUCCESS — Streamed multiplier finished!", Color.GREEN))
-    print(f"Saved: {out_file}")
-    print(c(f"Notes Before: {total_notes_in}", Color.YELLOW))
-    print(c(f"Notes After:  {total_notes_out}", Color.YELLOW))
-
+# =========================
+# ULTRA COMPRESS JSON
+# =========================
 @timer
-def compress_chart():
-    path = Path(clean_path(input("Path to chart: ")))
-    if not path.exists():
-        print(c("File not found!", Color.RED))
-        return
-
-    folder = make_folder("COMPRESSED")
-
-    with path.open("r", encoding="utf-8") as f:
-        chart = json.load(f)
-
-    # Fix all lanes/mustPress before compression
-    for sec in chart["song"]["notes"]:
-        sec["sectionNotes"] = [fix_note_side(n) for n in sec.get("sectionNotes", [])]
-
-    out_file = folder / f"{path.stem}_compressed.json"
-    with out_file.open("w", encoding="utf-8") as f:
-        json.dump(chart, f, separators=(",", ":"))
-
-    print(c("Compression complete!", Color.GREEN))
-    print(f"Saved: {out_file}")
-
-@timer
-def chart_details():
+def ultra_compress_json():
     path = Path(clean_path(input("Enter path to chart: ")))
     if not path.exists():
-        print(c("File not found!", Color.RED))
+        print(c(f"❌ File not found: {path}", Color.RED))
         return
-
+    folder_path = make_folder("UltraCompress_Folder")
     with path.open("r", encoding="utf-8") as f:
         chart = json.load(f)
 
-    song = chart["song"]
-
-    sections = song["notes"]
-    total_sections = len(sections)
-    total_notes = sum(len(sec.get("sectionNotes", [])) for sec in sections)
-
-    print(c("\n=== CHART DETAILS ===", Color.YELLOW))
-    print(f"Song Name:     {song.get('song','')}")
-    print(f"BPM:           {song.get('bpm','')}")
-    print(f"Stage:         {song.get('stage','')}")
-    print(f"Player1:       {song.get('player1','')}")
-    print(f"Player2:       {song.get('player2','')}")
-    print(f"NeedsVoices:   {song.get('needsVoices','')}")
-    print(f"ArrowSkin:     {song.get('arrowSkin','')}")
-    print()
-    print(f"Sections:      {total_sections}")
-    print(f"Total Notes:   {total_notes}")
-    print("=======================")
-
-@timer
-def midi_to_fnf():
-    midi_path = clean_path(input("Enter MIDI path: ").strip())
-    if not os.path.exists(midi_path):
-        print(f"❌ File not found: {midi_path}")
-        return
-
-    try:
-        bpm = float(input("Enter BPM (example 120): ").strip())
-    except ValueError:
-        print("❌ Invalid BPM. Using default 120.")
-        bpm = 120.0
-
-    print("Converting to JSON...")
-    mid = mido.MidiFile(midi_path)
-    ticks_per_beat = mid.ticks_per_beat
-    ms_per_tick = (60000 / bpm) / ticks_per_beat
-
-    notes = []
-    time_accum = 0
-    for msg in mid:
-        time_accum += msg.time * ms_per_tick
-        if msg.type == "note_on" and getattr(msg, "velocity", 0) > 0:
-            lane = msg.note % 4
-            notes.append({"time": round(time_accum, 2), "lane": lane, "sustain": 0})
-
-    chart = {
-        "song": {
-            "song": os.path.splitext(os.path.basename(midi_path))[0],
-            "bpm": bpm,
-            "notes": [{"sectionNotes": notes, "sectionBPM": bpm}],
-        }
-    }
-
-    folder_path = make_folder("MidiToFNF Folder")
-    new_file = os.path.join(folder_path, f"{chart['song']['song']}_converted.json")
-
-    with open(new_file, "w", encoding="utf-8") as f:
-        json.dump(chart, f, indent=4)
-
-    print("✅ Done. MIDI converted successfully.")
-    print(f"Saved in {folder_path}")
-
-# ======================================
-# MAIN MENU LOOP
-# ======================================
-def menu():
+    prev_size = None
+    current_chart = chart
     while True:
-        print("\n===================================")
-        print("FNF MULTITOOL — Streamlined Edition")
-        print("===================================")
-        print("1: Multiply Notes (Streamed, Fast)")
-        print("2: Merge Charts")
-        print("3: Split Chart")
-        print("4: Ultra Compress JSON")
-        print("5: Chart Details")
-        print("6: MIDI to FNF Chart")
-        print("Q: Quit")
+        compressed_str = compress_json(current_chart)
+        new_size = len(compressed_str.encode("utf-8"))
+        if prev_size and new_size >= prev_size * 0.98:
+            break
+        prev_size = new_size
+        current_chart = json.loads(compressed_str)
 
-        choice = input("\nSelect option: ").strip().upper()
+    new_file = folder_path / f"{path.stem}_ultracompressed.json"
+    with new_file.open("w", encoding="utf-8") as f:
+        json.dump(current_chart, f, indent=2)
+    print(f"✅ Done. Final size: {new_file.stat().st_size / (1024*1024):.2f} MB")
+    print(f"Saved in {new_file}")
 
-        match choice:
-            case "1": multiply_notes_streamed()
-            case "2": merge_charts()
-            case "3": split_chart()
-            case "4": compress_chart()
-            case "5": chart_details()
-            case "6": midi_to_fnf()
-            case "Q": break
-            case _: print(c("Invalid choice!", Color.RED))
+# =========================
+# MAIN LOOP
+# =========================
+def main():
+    while True:
+        choice = show_menu()
+        if choice == "Q":
+            print("Exiting...")
+            break
+        elif choice == "0":
+            append_notes()
+        elif choice == "1":
+            merge_charts()
+        elif choice == "2":
+            split_chart()
+        elif choice == "3":
+            multiply_notes_compress()
+        elif choice == "4":
+            ultra_compress_json()
+        else:
+            print(c("❌ Invalid choice!", Color.RED))
 
 if __name__ == "__main__":
-    print(c("⚡ FNF MULTITOOL — Streamlined Edition ⚡", Color.YELLOW))
-    print(c("Note: Player/Opponent lanes fixed automatically.\n", Color.GREEN))
-    menu()
+    print(c("FNF MULTITASK TOOL (Version: 0.3.0)", Color.YELLOW))
+    print(c("Warning: Large multipliers can produce huge files!", Color.RED))
+    main()
