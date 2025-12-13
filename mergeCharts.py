@@ -4,6 +4,9 @@ import time
 from pathlib import Path
 import argparse
 
+# =========================
+# TRY IMPORTS
+# =========================
 try:
     from pydub import AudioSegment
     import numpy as np
@@ -55,12 +58,13 @@ ROOT_FOLDER = Path(r"C:\Users\andre\Documents\CHARTS")
 ROOT_FOLDER.mkdir(exist_ok=True)
 
 # =========================
-# CLI ARGUMENTS
+# ARGUMENTS
 # =========================
 parser = argparse.ArgumentParser(description="FNF Multitask Tool")
 parser.add_argument("--action", type=str, help="Menu choice (0-10, Q)")
 parser.add_argument("--file", type=str, help="Path to chart JSON")
 parser.add_argument("--multiply", type=int, help="Multiplier for notes")
+parser.add_argument("--show-updates", action="store_true", help="Show menu and exit immediately")
 args = parser.parse_args()
 
 # =========================
@@ -86,9 +90,11 @@ Q: Quit
 """
     print(menu_text)
 
-    # CLI non-interactive mode
+    if args.show_updates:
+        print("⚡ CLI show-updates mode: menu displayed and exiting.")
+        exit(0)
+
     if args.action:
-        print(f"⚡ CLI mode detected. Auto-selecting option {args.action}")
         return args.action.upper()
 
     return input("Choose an option (0-10/Q): ").strip().upper()
@@ -96,9 +102,10 @@ Q: Quit
 # =========================
 # FUNCTIONS
 # =========================
+
 @timer
-def append_notes(file_path=None):
-    path = Path(file_path) if file_path else Path(clean_path(input("Enter path to JSON file: ")))
+def append_notes():
+    path = Path(args.file if args.file else clean_path(input("Enter path to JSON file: ")))
     if not path.exists():
         print(c(f"❌ File not found: {path}", Color.RED))
         return
@@ -194,38 +201,32 @@ def split_chart():
         start = end
     print("✅ Done.")
 
-# =========================
-# FAST MULTIPLY WITH STREAMING COMPRESSION
-# =========================
 @timer
-def multiply_notes_fast_compressed(file_path=None, multiplier=None):
+def multiply_notes_fast_compressed():
     try:
         import orjson
     except ImportError:
         print(c("❌ orjson not installed! Run: pip install orjson", Color.RED))
         return
 
-    path = Path(file_path) if file_path else Path(clean_path(input("Enter path to chart: ")))
+    path = Path(args.file if args.file else clean_path(input("Enter path to chart: ")))
     if not path.exists():
         print(c(f"❌ File not found: {path}", Color.RED))
         return
 
     folder_path = make_folder("Multiply_FastCompressed")
 
-    if multiplier is None:
-        try:
-            multiplier = int(input("Enter multiplier (>=2): ").strip())
-            if multiplier < 2:
-                raise ValueError
-        except ValueError:
-            print(c("❌ Invalid multiplier!", Color.RED))
-            return
+    multiplier = args.multiply if args.multiply else int(input("Enter multiplier (>=2): ").strip())
+    if multiplier < 2:
+        print(c("❌ Invalid multiplier!", Color.RED))
+        return
 
     # FAST LOAD
     with path.open("r", encoding="utf-8") as f:
         chart = json.load(f)
 
-    sections = chart["song"]["notes"]
+    song = chart["song"]
+    sections = song["notes"]
 
     # ⏱️ Multiply
     t_mul_start = time.time()
@@ -236,8 +237,9 @@ def multiply_notes_fast_compressed(file_path=None, multiplier=None):
     t_mul_end = time.time()
     print(c(f"Multiply time: {t_mul_end - t_mul_start:.3f}s", Color.YELLOW))
 
-    # ⏱️ Write using orjson (faster than json.dump)
     out_file = folder_path / f"{path.stem}_x{multiplier}_FAST.json"
+
+    # ⏱️ Write using orjson
     t_write_start = time.time()
     data_bytes = orjson.dumps(chart, option=orjson.OPT_APPEND_NEWLINE)
     with out_file.open("wb") as f:
@@ -249,9 +251,6 @@ def multiply_notes_fast_compressed(file_path=None, multiplier=None):
     print(c(f"✅ Done. Total notes: {total_notes}", Color.GREEN))
     print(f"Saved in {out_file}")
 
-# =========================
-# ULTRA COMPRESS JSON
-# =========================
 @timer
 def ultra_compress_json():
     path = Path(clean_path(input("Enter path to chart: ")))
@@ -288,20 +287,17 @@ def main():
             print("Exiting...")
             break
         elif choice == "0":
-            append_notes(file_path=args.file)
+            append_notes()
         elif choice == "1":
             merge_charts()
         elif choice == "2":
             split_chart()
         elif choice == "3":
-            multiply_notes_fast_compressed(file_path=args.file, multiplier=args.multiply)
+            multiply_notes_fast_compressed()
         elif choice == "4":
             ultra_compress_json()
         else:
             print(c("❌ Invalid choice!", Color.RED))
-
-        if args.action:
-            break  # exit after one action in CLI mode
 
 if __name__ == "__main__":
     print(c("FNF MULTITASK TOOL (Version: 0.3.0)", Color.YELLOW))
