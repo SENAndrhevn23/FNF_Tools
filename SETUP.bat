@@ -51,33 +51,22 @@ python -m pip install pydub >> %LOGFILE% 2>&1
 echo Installing numpy...
 python -m pip install numpy >> %LOGFILE% 2>&1
 
+echo Installing orjson (for faster JSON serialization)...
+python -m pip install orjson >> %LOGFILE% 2>&1
+
 echo ✔ Modules installed!
 echo.
 
 :: ===============================
-:: CHECK & INSTALL FFMPEG
+:: CHECK FFmpeg
 :: ===============================
 echo Checking FFmpeg...
 where ffmpeg >nul 2>&1
 if %errorlevel% neq 0 (
-    echo FFmpeg not found, installing portable version...
-    echo Downloading FFmpeg ZIP...
-
-    powershell -command ^
-     "Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile 'ffmpeg.zip'" ^
-     >> %LOGFILE% 2>&1
-
-    echo Extracting FFmpeg...
-    powershell -command ^
-     "Expand-Archive -Path 'ffmpeg.zip' -DestinationPath 'ffmpeg_temp' -Force" ^
-     >> %LOGFILE% 2>&1
-
-    for /d %%i in (ffmpeg_temp\*) do set FFMPEG_DIR=%%i
-
-    echo Adding FFmpeg to PATH...
-    setx PATH "%PATH%;%CD%\!FFMPEG_DIR!\bin" >> %LOGFILE% 2>&1
-
-    echo ✔ FFmpeg installed!
+    echo FFmpeg not found!
+    echo Opening FFmpeg GitHub page for manual download...
+    start https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+    echo Please download and extract FFmpeg, then add it to your PATH.
 ) else (
     echo ✔ FFmpeg already installed!
 )
@@ -88,7 +77,6 @@ echo.
 :: ===============================
 echo Creating chart folder:
 echo %ROOT_FOLDER%
-
 mkdir "%ROOT_FOLDER%" >nul 2>&1
 echo ✔ Folder ready!
 echo.
