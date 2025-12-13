@@ -180,62 +180,58 @@ def split_chart():
 # FAST MULTIPLY WITH STREAMING COMPRESSION
 # =========================
 @timer
-def multiply_notes_compress():
+def multiply_notes_fast_compressed():
+    try:
+        import orjson
+    except ImportError:
+        print(c("❌ orjson not installed! Run: pip install orjson", Color.RED))
+        return
+
     path = Path(clean_path(input("Enter path to chart: ")))
     if not path.exists():
         print(c(f"❌ File not found: {path}", Color.RED))
         return
-    folder_path = make_folder("Multiply_Compress_Folder")
+
+    folder_path = make_folder("Multiply_FastCompressed")
 
     try:
-        multiplier = int(input("Enter multiplier (max 2,000,000,000): ").strip())
+        multiplier = int(input("Enter multiplier (>=2): ").strip())
         if multiplier < 2:
             raise ValueError
     except ValueError:
         print(c("❌ Invalid multiplier!", Color.RED))
         return
 
+    # FAST LOAD
     with path.open("r", encoding="utf-8") as f:
         chart = json.load(f)
 
-    out_file = folder_path / f"{path.stem}_multiplied_compressed.json"
+    song = chart["song"]
+    sections = song["notes"]
 
-    with out_file.open("w", encoding="utf-8") as f:
-        f.write('{"song":{')
-        f.write(f'"player1":"{chart["song"].get("player1","bf")}",')
-        f.write(f'"player2":"{chart["song"].get("player2","dad")}",')
-        f.write('"notes":[')
+    # ⏱️ Multiply
+    t_mul_start = time.time()
+    for s in sections:
+        notes = s.get("sectionNotes")
+        if notes:
+            s["sectionNotes"] = notes * multiplier
+    t_mul_end = time.time()
+    print(c(f"Multiply time: {t_mul_end - t_mul_start:.3f}s", Color.YELLOW))
 
-        first_section = True
-        for section in chart["song"]["notes"]:
-            notes = section.get("sectionNotes", [])
-            if not notes:
-                continue
+    out_file = folder_path / f"{path.stem}_x{multiplier}_FAST.json"
 
-            # Multiply in chunks to reduce memory usage
-            multiplied_notes = []
-            chunk = 10000
-            for note in notes:
-                multiplied_notes.extend([note] * multiplier)
-                if len(multiplied_notes) >= chunk:
-                    # write partial JSON to reduce memory
-                    section_json = compress_json({"sectionNotes": multiplied_notes})
-                    if not first_section:
-                        f.write(',')
-                    f.write(section_json[1:-1])  # remove outer {}
-                    multiplied_notes = []
-                    first_section = False
+    # ⏱️ Write using orjson (faster than json.dump)
+    t_write_start = time.time()
+    data_bytes = orjson.dumps(chart, option=orjson.OPT_APPEND_NEWLINE)
+    with out_file.open("wb") as f:
+        f.write(data_bytes)
+    t_write_end = time.time()
+    print(c(f"Write/Compress time: {t_write_end - t_write_start:.3f}s", Color.YELLOW))
 
-            if multiplied_notes:
-                section_json = compress_json({"sectionNotes": multiplied_notes})
-                if not first_section:
-                    f.write(',')
-                f.write(section_json[1:-1])
-                first_section = False
+    total_notes = sum(len(s["sectionNotes"]) for s in sections)
+    print(c(f"✅ Done. Total notes: {total_notes}", Color.GREEN))
+    print(f"Saved in {out_file}")
 
-        f.write(']}}')
-
-    print(f"✅ Done. Multiplied & compressed notes saved in {out_file}")
 
 # =========================
 # ULTRA COMPRESS JSON
@@ -282,7 +278,7 @@ def main():
         elif choice == "2":
             split_chart()
         elif choice == "3":
-            multiply_notes_compress()
+            multiply_notes_fast_compressed()
         elif choice == "4":
             ultra_compress_json()
         else:
