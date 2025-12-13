@@ -1,4 +1,4 @@
-# Merged Tool
+# Merged Tool (Future Of FNF Charting)
 
 A simple Python tool created by **Andre Nicholas Jr**.  
 
