@@ -209,47 +209,56 @@ def multiply_notes_fast_compressed():
         print(c("❌ orjson not installed! Run: pip install orjson", Color.RED))
         return
 
-    path = Path(args.file if args.file else clean_path(input("Enter path to chart: ")))
+    path = Path(clean_path(input("Enter path to chart: ")))
     if not path.exists():
         print(c(f"❌ File not found: {path}", Color.RED))
         return
 
     folder_path = make_folder("Multiply_FastCompressed")
 
-    multiplier = args.multiply if args.multiply else int(input("Enter multiplier (>=2): ").strip())
-    if multiplier < 2:
+    try:
+        multiplier = int(input("Enter multiplier (>=2): ").strip())
+        if multiplier < 2:
+            raise ValueError
+    except ValueError:
         print(c("❌ Invalid multiplier!", Color.RED))
         return
 
-    # FAST LOAD
-    with path.open("r", encoding="utf-8") as f:
-        chart = json.load(f)
+    out_file = folder_path / f"{path.stem}_x{multiplier}_STREAM.json"
 
-    song = chart["song"]
-    sections = song["notes"]
+    # ⏱️ Start streaming
+    t_start = time.time()
+    with path.open("r", encoding="utf-8") as f, out_file.open("wb") as out:
+        chart = orjson.loads(f.read())
+        song = chart["song"]
 
-    # ⏱️ Multiply
-    t_mul_start = time.time()
-    for s in sections:
-        notes = s.get("sectionNotes")
-        if notes:
-            s["sectionNotes"] = notes * multiplier
-    t_mul_end = time.time()
-    print(c(f"Multiply time: {t_mul_end - t_mul_start:.3f}s", Color.YELLOW))
+        # Write header
+        header = {
+            "player1": song.get("player1", "bf"),
+            "player2": song.get("player2", "dad")
+        }
+        out.write(b'{"song":')
+        out.write(orjson.dumps(header)[:-1])  # remove closing }
+        out.write(b',"notes":[')
 
-    out_file = folder_path / f"{path.stem}_x{multiplier}_FAST.json"
+        first_section = True
+        for s in song["notes"]:
+            notes = s.get("sectionNotes", [])
+            if notes:
+                section_bytes = orjson.dumps({"sectionNotes": notes * multiplier})
+                if not first_section:
+                    out.write(b',')
+                out.write(section_bytes[1:-1])  # remove outer {}
+                first_section = False
 
-    # ⏱️ Write using orjson
-    t_write_start = time.time()
-    data_bytes = orjson.dumps(chart, option=orjson.OPT_APPEND_NEWLINE)
-    with out_file.open("wb") as f:
-        f.write(data_bytes)
-    t_write_end = time.time()
-    print(c(f"Write/Compress time: {t_write_end - t_write_start:.3f}s", Color.YELLOW))
+        out.write(b']}}')
 
-    total_notes = sum(len(s["sectionNotes"]) for s in sections)
-    print(c(f"✅ Done. Total notes: {total_notes}", Color.GREEN))
+    t_end = time.time()
+    print(c(f"✅ Done. Elapsed time: {t_end - t_start:.2f}s", Color.GREEN))
+    total_notes = sum(len(s.get("sectionNotes", [])) * multiplier for s in song["notes"])
+    print(c(f"Total notes: {total_notes}", Color.GREEN))
     print(f"Saved in {out_file}")
+
 
 @timer
 def ultra_compress_json():
@@ -303,3 +312,4 @@ if __name__ == "__main__":
     print(c("FNF MULTITASK TOOL (Version: 0.3.0)", Color.YELLOW))
     print(c("Warning: Large multipliers can produce huge files!", Color.RED))
     main()
+
