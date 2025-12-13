@@ -2,6 +2,7 @@ import json
 import copy
 import time
 from pathlib import Path
+import argparse
 
 try:
     from pydub import AudioSegment
@@ -54,33 +55,50 @@ ROOT_FOLDER = Path(r"C:\Users\andre\Documents\CHARTS")
 ROOT_FOLDER.mkdir(exist_ok=True)
 
 # =========================
+# CLI ARGUMENTS
+# =========================
+parser = argparse.ArgumentParser(description="FNF Multitask Tool")
+parser.add_argument("--action", type=str, help="Menu choice (0-10, Q)")
+parser.add_argument("--file", type=str, help="Path to chart JSON")
+parser.add_argument("--multiply", type=int, help="Multiplier for notes")
+args = parser.parse_args()
+
+# =========================
 # MENU
 # =========================
 def show_menu():
-    print("\n========================================")
-    print("FNF MULTITASK TOOL")
-    print("========================================")
-    print("0: Append Notes to Empty Sections")
-    print("1: Merge Charts")
-    print("2: Split Chart")
-    print("3: Multiply Notes (Fast & Compressed)")
-    print("4: Ultra-Compress JSON")
-    print("5: NPS Fill")
-    print("6: Load Large Charts (sorted)")
-    print("7: MIDI to FNF Chart")
-    print("8: Dynamic Note Multiplier")
-    print("9: Multi-Pass JSON Compression")
-    print("10: Audio to FNF Chart")
-    print("Q: Quit")
+    menu_text = """
+========================================
+FNF MULTITASK TOOL
+========================================
+0: Append Notes to Empty Sections
+1: Merge Charts
+2: Split Chart
+3: Multiply Notes (Fast & Compressed)
+4: Ultra-Compress JSON
+5: NPS Fill
+6: Load Large Charts (sorted)
+7: MIDI to FNF Chart
+8: Dynamic Note Multiplier
+9: Multi-Pass JSON Compression
+10: Audio to FNF Chart
+Q: Quit
+"""
+    print(menu_text)
+
+    # CLI non-interactive mode
+    if args.action:
+        print(f"⚡ CLI mode detected. Auto-selecting option {args.action}")
+        return args.action.upper()
+
     return input("Choose an option (0-10/Q): ").strip().upper()
 
 # =========================
 # FUNCTIONS
 # =========================
-
 @timer
-def append_notes():
-    path = Path(clean_path(input("Enter path to JSON file: ")))
+def append_notes(file_path=None):
+    path = Path(file_path) if file_path else Path(clean_path(input("Enter path to JSON file: ")))
     if not path.exists():
         print(c(f"❌ File not found: {path}", Color.RED))
         return
@@ -171,7 +189,7 @@ def split_chart():
         new_chart["song"]["notes"] = base["song"]["notes"][start:end]
         output_file = folder_path / f"{output_name}-{i+1}.json"
         with output_file.open("w", encoding="utf-8") as out:
-            json.dump(new_chart, out, indent=4)
+            json.dump(new_chart, f, indent=4)
         print(f"{output_file}: {len(new_chart['song']['notes'])} sections")
         start = end
     print("✅ Done.")
@@ -180,34 +198,34 @@ def split_chart():
 # FAST MULTIPLY WITH STREAMING COMPRESSION
 # =========================
 @timer
-def multiply_notes_fast_compressed():
+def multiply_notes_fast_compressed(file_path=None, multiplier=None):
     try:
         import orjson
     except ImportError:
         print(c("❌ orjson not installed! Run: pip install orjson", Color.RED))
         return
 
-    path = Path(clean_path(input("Enter path to chart: ")))
+    path = Path(file_path) if file_path else Path(clean_path(input("Enter path to chart: ")))
     if not path.exists():
         print(c(f"❌ File not found: {path}", Color.RED))
         return
 
     folder_path = make_folder("Multiply_FastCompressed")
 
-    try:
-        multiplier = int(input("Enter multiplier (>=2): ").strip())
-        if multiplier < 2:
-            raise ValueError
-    except ValueError:
-        print(c("❌ Invalid multiplier!", Color.RED))
-        return
+    if multiplier is None:
+        try:
+            multiplier = int(input("Enter multiplier (>=2): ").strip())
+            if multiplier < 2:
+                raise ValueError
+        except ValueError:
+            print(c("❌ Invalid multiplier!", Color.RED))
+            return
 
     # FAST LOAD
     with path.open("r", encoding="utf-8") as f:
         chart = json.load(f)
 
-    song = chart["song"]
-    sections = song["notes"]
+    sections = chart["song"]["notes"]
 
     # ⏱️ Multiply
     t_mul_start = time.time()
@@ -218,9 +236,8 @@ def multiply_notes_fast_compressed():
     t_mul_end = time.time()
     print(c(f"Multiply time: {t_mul_end - t_mul_start:.3f}s", Color.YELLOW))
 
-    out_file = folder_path / f"{path.stem}_x{multiplier}_FAST.json"
-
     # ⏱️ Write using orjson (faster than json.dump)
+    out_file = folder_path / f"{path.stem}_x{multiplier}_FAST.json"
     t_write_start = time.time()
     data_bytes = orjson.dumps(chart, option=orjson.OPT_APPEND_NEWLINE)
     with out_file.open("wb") as f:
@@ -231,7 +248,6 @@ def multiply_notes_fast_compressed():
     total_notes = sum(len(s["sectionNotes"]) for s in sections)
     print(c(f"✅ Done. Total notes: {total_notes}", Color.GREEN))
     print(f"Saved in {out_file}")
-
 
 # =========================
 # ULTRA COMPRESS JSON
@@ -272,17 +288,20 @@ def main():
             print("Exiting...")
             break
         elif choice == "0":
-            append_notes()
+            append_notes(file_path=args.file)
         elif choice == "1":
             merge_charts()
         elif choice == "2":
             split_chart()
         elif choice == "3":
-            multiply_notes_fast_compressed()
+            multiply_notes_fast_compressed(file_path=args.file, multiplier=args.multiply)
         elif choice == "4":
             ultra_compress_json()
         else:
             print(c("❌ Invalid choice!", Color.RED))
+
+        if args.action:
+            break  # exit after one action in CLI mode
 
 if __name__ == "__main__":
     print(c("FNF MULTITASK TOOL (Version: 0.3.0)", Color.YELLOW))
