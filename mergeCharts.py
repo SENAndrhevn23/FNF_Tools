@@ -8,7 +8,7 @@ import mido
 # ======================================
 # CONFIG
 # ======================================
-ROOT_FOLDER = Path(r"C:\Users\yourname\Documents\YourFolder")
+ROOT_FOLDER = Path(r"C:\Users\andre\Documents\CHARTS")
 ROOT_FOLDER.mkdir(exist_ok=True)
 
 # ======================================
@@ -43,27 +43,90 @@ def compress_json(data):
 # FIX NOTE SIDES (Script 2 feature)
 # ======================================
 def fix_note_side(note):
-    """Ensures player notes go on lanes 4-7, opponent on 0-3"""
-    if len(note) < 4:
+    """
+    Ensures player notes go on lanes 4-7, opponent on 0-3.
+
+    Supports both:
+      - list/tuple notes (e.g. [time, lane, length, mustPress, ...extra...])
+      - dict-style notes (e.g. {"time":..., "lane":..., "mustPress":...})
+
+    Preserves extra metadata (keeps fields after index 3 for lists).
+    """
+    # --- Dict-style notes ---
+    if isinstance(note, dict):
+        # try several possible names for mustPress and lane
+        mp_key = None
+        for k in ("mustPress", "mustHitSection", "mp", "mustpress"):
+            if k in note:
+                mp_key = k
+                break
+
+        lane_key = None
+        for k in ("lane", "direction", "note"):
+            if k in note:
+                lane_key = k
+                break
+
+        # if we don't have a lane key, we can't fix anything
+        if lane_key is None:
+            return note
+
+        lane = note[lane_key]
+
+        # normalize mustPress value (if present)
+        mp_val = None
+        if mp_key is not None:
+            mp_val = note.get(mp_key)
+
+        if isinstance(mp_val, bool):
+            mp_int = 1 if mp_val else 0
+        else:
+            try:
+                mp_int = int(mp_val) if mp_val is not None else None
+            except Exception:
+                mp_int = None
+
+        if mp_int == 1:  # player
+            note[lane_key] = (lane % 4) + 4
+            if mp_key is not None:
+                note[mp_key] = 1
+        elif mp_int == 0:  # opponent
+            note[lane_key] = lane % 4
+            if mp_key is not None:
+                note[mp_key] = 0
+        # if mp unknown, leave lane as-is
         return note
 
-    time_, lane, length, mp = note
+    # --- list/tuple-style notes ---
+    if isinstance(note, (list, tuple)):
+        if len(note) < 4:
+            return note  # can't reliably interpret
 
-    # Normalize mustPress
-    if isinstance(mp, bool):
-        mp = 1 if mp else 0
-    else:
-        try:
-            mp = int(mp)
-        except:
-            mp = 0
+        time_ = note[0]
+        lane = note[1]
+        length = note[2]
+        mp = note[3]
 
-    if mp == 1:  # Player
-        lane = (lane % 4) + 4
-    else:        # Opponent
-        lane = lane % 4
+        # Normalize mustPress
+        if isinstance(mp, bool):
+            mp = 1 if mp else 0
+        else:
+            try:
+                mp = int(mp)
+            except Exception:
+                mp = 0
 
-    return [time_, lane, length, mp]
+        if mp == 1:  # Player
+            lane = (lane % 4) + 4
+        else:        # Opponent or unknown treated as opponent
+            lane = lane % 4
+
+        # preserve any extra fields after the 4th item
+        extra = list(note[4:]) if len(note) > 4 else []
+        return [time_, lane, length, mp, *extra]
+
+    # Unknown note format: return as-is (safe)
+    return note
 
 # ======================================
 # TIMER DECORATOR
@@ -274,7 +337,7 @@ def chart_details():
 
     sections = song["notes"]
     total_sections = len(sections)
-    total_notes = sum(len(sec["sectionNotes"]) for sec in sections)
+    total_notes = sum(len(sec.get("sectionNotes", [])) for sec in sections)
 
     print(c("\n=== CHART DETAILS ===", Color.YELLOW))
     print(f"Song Name:     {song.get('song','')}")
@@ -311,7 +374,7 @@ def midi_to_fnf():
     time_accum = 0
     for msg in mid:
         time_accum += msg.time * ms_per_tick
-        if msg.type == "note_on" and msg.velocity > 0:
+        if msg.type == "note_on" and getattr(msg, "velocity", 0) > 0:
             lane = msg.note % 4
             notes.append({"time": round(time_accum, 2), "lane": lane, "sustain": 0})
 
@@ -364,4 +427,3 @@ if __name__ == "__main__":
     print(c("⚡ FNF MULTITOOL — Streamlined Edition ⚡", Color.YELLOW))
     print(c("Note: Player/Opponent lanes fixed automatically.\n", Color.GREEN))
     menu()
-
