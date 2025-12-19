@@ -309,7 +309,8 @@ def main():
             print(c("❌ Invalid choice!", Color.RED))
 
 if __name__ == "__main__":
-    print(c("FNF MULTITASK TOOL (Version: 0.3.0)", Color.YELLOW))
+    print(c("FNF MULTITASK TOOL (Version: 0.3.1)", Color.YELLOW))
     print(c("Warning: Large multipliers can produce huge files!", Color.RED))
     main()
+
 
