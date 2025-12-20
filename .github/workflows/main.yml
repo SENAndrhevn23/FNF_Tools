@@ -35,4 +35,5 @@ jobs:
 
       - name: Run mergeCharts.py
         run: |
-          python mergeCharts.py --show-updates
+          python mergeCharts.py --action 3 --file chart.json --multiply 4
+
