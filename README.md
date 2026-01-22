@@ -111,7 +111,7 @@ This keeps project dependencies isolated and safe.
 
  # WORKING STATUS OR BROKEN
 
-1: Merging (Broken but only loads the first json from your split)
-2: Splitting (Works perfectly)
-3: Muilplying (Works fine but it breaks the entire json)
-4: Compressing Json (Works fine but sometimes makes the json unreadable)
+1. Merging (Broken but only loads the first json from your split)
+2. Splitting (Works perfectly)
+3. Muilplying (Works fine but it breaks the entire json)
+4. Compressing Json (Works fine but sometimes makes the json unreadable)
