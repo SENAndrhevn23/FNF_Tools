@@ -8,8 +8,6 @@ from typing import Union, List, Iterator
 # =========================
 # CONFIG & COLORS
 # =========================
-MAX_SIZE_MB = 1990 
-
 class Color:
     GREEN = '\033[92m'
     RED = '\033[91m'
@@ -45,140 +43,153 @@ def load_json(path: Path):
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(c(f"Error loading JSON: {e}", Color.RED))
+        print(c(f"Error: {e}", Color.RED))
         return None
 
-def calculate_loop_ms(chart: dict) -> float:
-    """Calculates total duration in ms to offset repeated notes."""
-    bpm = chart["song"].get("bpm", 100)
+def calculate_song_ms(sections: List[dict], bpm: float) -> float:
+    """Calculates total MS duration of a list of sections."""
     ms_per_beat = 60000 / bpm
     total_ms = 0
-    for sec in chart["song"]["notes"]:
-        beats = sec.get("sectionBeats", 4)
-        total_ms += beats * ms_per_beat
+    for sec in sections:
+        total_ms += sec.get("sectionBeats", 4) * ms_per_beat
     return total_ms
 
 # =========================
-# THE FIX: STREAMING & METADATA
+# THE REPAIR ENGINE (STREAMING WRITER)
 # =========================
-def _write_valid_fnf_json(out_path: Path, metadata: dict, sections_iter: Iterator[dict], total_count: int):
-    """Writes a valid FNF JSON by preserving song metadata and streaming notes."""
+def _write_valid_fnf_json(out_path: Path, song_obj: dict, sections_iter: Iterator[dict], total_count: int):
+    """The core engine that prevents corruption and memory freezing."""
     temp = out_path.with_suffix(".tmp")
     with temp.open("w", encoding="utf-8") as f:
         f.write('{"song":{')
-        # Write all song keys (bpm, speed, etc) except notes
-        meta_items = [f'"{k}":{json.dumps(v)}' for k, v in metadata.items() if k != "notes"]
-        f.write(",".join(meta_items))
-        f.write(',"notes":[')
+        meta_keys = [k for k in song_obj.keys() if k != "notes"]
+        for i, k in enumerate(meta_keys):
+            f.write(f'"{k}":{json.dumps(song_obj[k], separators=(",", ":"))}')
+            f.write(',')
         
+        f.write('"notes":[')
         for i in range(total_count):
             try:
                 sec = next(sections_iter)
                 json.dump(sec, f, separators=(",", ":"))
-                if i < total_count - 1: f.write(',')
+                if i < total_count - 1: f.write(",")
             except StopIteration: break
-            
         f.write(']}}')
+    
+    if out_path.exists(): out_path.unlink()
     temp.rename(out_path)
-    print(c(f"Saved → {out_path}", Color.YELLOW))
+    print(c(f"File Generated → {out_path.name}", Color.YELLOW))
 
 # =========================
-# CORE FEATURES
+# FIXED CORE FEATURES
 # =========================
 
 @timer
-def append_notes(path: Path):
-    chart = load_json(path)
-    if not chart: return
-    notes_pool = []
-    for sec in chart["song"]["notes"]:
-        if sec.get("sectionNotes"):
-            notes_pool.extend(copy.deepcopy(sec["sectionNotes"]))
-    
-    for sec in chart["song"]["notes"]:
-        if not sec.get("sectionNotes"):
-            sec["sectionNotes"] = copy.deepcopy(notes_pool)
-            
-    _write_valid_fnf_json(path.parent / f"{path.stem}_appended.json", chart["song"], iter(chart["song"]["notes"]), len(chart["song"]["notes"]))
-
-@timer
-def merge_charts(paths: List[Path]):
+def merge_charts_fixed(paths: List[Path]):
+    """Merges multiple JSONs into 1 file and shifts timestamps so they play in order."""
+    if not paths: return
     charts = [load_json(p) for p in paths if p.exists()]
+    charts = [ch for ch in charts if ch and "song" in ch]
     if not charts: return
-    base = charts[0]
-    all_sections = []
-    for ch in charts:
-        all_sections.extend(ch["song"]["notes"])
+
+    base_metadata = charts[0]["song"]
     
-    _write_valid_fnf_json(paths[0].parent / "merged_chart.json", base["song"], iter(all_sections), len(all_sections))
+    def merge_generator():
+        current_offset_ms = 0
+        for ch in charts:
+            song_data = ch["song"]
+            bpm = song_data.get("bpm", 100)
+            sections = song_data.get("notes", [])
+            
+            for sec in sections:
+                new_sec = copy.deepcopy(sec)
+                if "sectionNotes" in new_sec:
+                    for note in new_sec["sectionNotes"]:
+                        note[0] += current_offset_ms # Shift time forward
+                yield new_sec
+            
+            # Update offset for the next song in the merge
+            current_offset_ms += calculate_song_ms(sections, bpm)
+
+    total_sections = sum(len(ch["song"].get("notes", [])) for ch in charts)
+    out_path = paths[0].parent / "MERGED_SONG.json"
+    _write_valid_fnf_json(out_path, base_metadata, merge_generator(), total_sections)
 
 @timer
-def split_chart(path: Path, parts: int):
-    chart = load_json(path)
-    if not chart: return
-    notes = chart["song"]["notes"]
-    size = math.ceil(len(notes) / max(parts, 1))
-    for i in range(parts):
-        chunk = notes[i*size : (i+1)*size]
-        if chunk:
-            _write_valid_fnf_json(path.parent / f"{path.stem}_part{i+1}.json", chart["song"], iter(chunk), len(chunk))
-
-@timer
-def multiply_streaming(path: Path, multiplier: int):
+def split_chart_fixed(path: Path, parts: int):
+    """Splits a chart into parts instantly without hanging."""
     chart = load_json(path)
     if not chart or "song" not in chart: return
     
-    orig_sections = chart["song"]["notes"]
-    loop_ms = calculate_loop_ms(chart)
-    total_count = len(orig_sections) * multiplier
+    sections = chart["song"]["notes"]
+    total = len(sections)
+    chunk_size = math.ceil(total / parts)
+
+    for i in range(parts):
+        start = i * chunk_size
+        end = min(start + chunk_size, total)
+        chunk = sections[start:end]
+        
+        if not chunk: break
+        
+        out_path = path.parent / f"{path.stem}_part{i+1}.json"
+        # We pass a simple iterator of the slice to the writer
+        _write_valid_fnf_json(out_path, chart["song"], iter(chunk), len(chunk))
+
+@timer
+def multiply_streaming_fixed(path: Path, multiplier: int):
+    """The fixed multiplier with timestamp offsetting."""
+    chart = load_json(path)
+    if not chart: return
     
-    def offset_gen():
+    orig_sections = chart["song"]["notes"]
+    bpm = chart["song"].get("bpm", 100)
+    loop_ms = calculate_song_ms(orig_sections, bpm)
+    
+    def mult_gen():
         for i in range(multiplier):
-            ts_offset = i * loop_ms
+            offset = i * loop_ms
             for sec in orig_sections:
                 new_sec = copy.deepcopy(sec)
                 if "sectionNotes" in new_sec:
                     for n in new_sec["sectionNotes"]:
-                        n[0] += ts_offset # Shift the time!
+                        n[0] += offset
                 yield new_sec
 
-    out_name = f"{path.stem}_x{multiplier}.json"
-    _write_valid_fnf_json(path.parent / out_name, chart["song"], offset_gen(), total_count)
+    total_count = len(orig_sections) * multiplier
+    _write_valid_fnf_json(path.parent / f"{path.stem}_x{multiplier}.json", chart["song"], mult_gen(), total_count)
 
 # =========================
-# MENU SYSTEM
+# INTERFACE
 # =========================
 def main():
     while True:
-        print(c("\n--- FNF MULTITASK TOOL (ALL OPTIONS FIXED) ---", Color.MAGENTA))
-        print("0 - Append (Fill empty sections)")
-        print("1 - Merge (Combine multiple JSONs)")
-        print("2 - Split (Divide chart into parts)")
-        print("3 - Multiply (Safe + Time-Offset)")
-        print("4 - Compress (Compact JSON format)")
+        print(c("\n--- FNF TOOL: ULTIMATE REPAIR EDITION ---", Color.MAGENTA))
+        print("1 - Merge (Join multiple JSONs into 1)")
+        print("2 - Split (Divide JSON into parts - FAST)")
+        print("3 - Multiply (Repeat song X times)")
+        print("4 - Compress (Fix Corruption/Metadata)")
         print("Q - Quit")
         
         choice = input("Select: ").upper().strip()
-        
         if choice == "Q": break
         
-        if choice in ["0", "2", "3", "4"]:
-            p = clean_path(input("Path to JSON: "))
-            if choice == "0": append_notes(p)
-            elif choice == "2":
-                parts = int(input("Number of parts: "))
-                split_chart(p, parts)
-            elif choice == "3":
-                m = int(input("Multiplier: "))
-                multiply_streaming(p, m)
-            elif choice == "4":
-                chart = load_json(p)
-                if chart: _write_valid_fnf_json(p.parent / f"{p.stem}_compact.json", chart["song"], iter(chart["song"]["notes"]), len(chart["song"]["notes"]))
-        
-        elif choice == "1":
-            raw = input("Paths (space separated): ")
+        if choice == "1":
+            raw = input("Drop all files here (space separated): ")
             paths = [clean_path(x) for x in shlex.split(raw)]
-            merge_charts(paths)
+            merge_charts_fixed(paths)
+        elif choice == "2":
+            p = clean_path(input("Path: "))
+            n = int(input("How many parts?: "))
+            split_chart_fixed(p, n)
+        elif choice == "3":
+            p = clean_path(input("Path: "))
+            m = int(input("Multiplier: "))
+            multiply_streaming_fixed(p, m)
+        elif choice == "4":
+            p = clean_path(input("Path: "))
+            ch = load_json(p)
+            if ch: _write_valid_fnf_json(p.parent/f"{p.stem}_fixed.json", ch["song"], iter(ch["song"]["notes"]), len(ch["song"]["notes"]))
 
 if __name__ == "__main__":
     main()
