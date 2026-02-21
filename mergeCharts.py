@@ -1,195 +1,194 @@
 #!/usr/bin/env python3
-import json, copy, time, math, sys, os, shlex
+import json, copy, time, math, sys, os, shlex, gc
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from functools import wraps
 from typing import Union, List, Iterator
 
 # =========================
-# CONFIG & COLORS
+# COLORS & LOGGING
 # =========================
 class Color:
     GREEN = '\033[92m'
     RED = '\033[91m'
     YELLOW = '\033[93m'
     MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
     RESET = '\033[0m'
 
 def c(text: str, color: str = Color.RESET) -> str:
     return f"{color}{text}{Color.RESET}"
 
-def timer(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start = time.time()
-        result = func(*args, **kwargs)
-        print(c(f"Done in {time.time() - start:.2f}s\n", Color.GREEN))
-        return result
-    return wrapper
-
 # =========================
-# PATH & IO HELPERS
+# DATA HELPERS
 # =========================
-def clean_path(p: Union[str, Path, None]) -> Path:
-    if p is None: return Path(".")
-    p = str(p).strip().strip('"').strip("'")
+def clean_path(p: str) -> Path:
+    p = p.strip().strip('"').strip("'")
     if p.startswith("file://"):
         p = unquote(urlparse(p).path)
     return Path(os.path.normpath(os.path.expanduser(os.path.expandvars(p))))
 
-def load_json(path: Path):
+def load_json_minimal(path: Path):
     if not path.exists(): return None
     try:
         with path.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            return data["song"] if "song" in data else data
     except Exception as e:
         print(c(f"Error: {e}", Color.RED))
         return None
 
-def calculate_song_ms(sections: List[dict], bpm: float) -> float:
-    """Calculates total MS duration of a list of sections."""
-    ms_per_beat = 60000 / bpm
-    total_ms = 0
-    for sec in sections:
-        total_ms += sec.get("sectionBeats", 4) * ms_per_beat
-    return total_ms
+def count_notes_in_sections(sections: List[dict]) -> int:
+    count = 0
+    for s in sections:
+        if isinstance(s, dict) and "sectionNotes" in s:
+            count += len(s["sectionNotes"])
+    return count
 
 # =========================
-# THE REPAIR ENGINE (STREAMING WRITER)
+# THE STREAMING ENGINE
 # =========================
-def _write_valid_fnf_json(out_path: Path, song_obj: dict, sections_iter: Iterator[dict], total_count: int):
-    """The core engine that prevents corruption and memory freezing."""
+def _write_and_report(out_path: Path, song_obj: dict, sections_iter: Iterator[dict], total_sections: int):
     temp = out_path.with_suffix(".tmp")
-    with temp.open("w", encoding="utf-8") as f:
-        f.write('{"song":{')
-        meta_keys = [k for k in song_obj.keys() if k != "notes"]
-        for i, k in enumerate(meta_keys):
-            f.write(f'"{k}":{json.dumps(song_obj[k], separators=(",", ":"))}')
-            f.write(',')
-        
-        f.write('"notes":[')
-        for i in range(total_count):
-            try:
-                sec = next(sections_iter)
-                json.dump(sec, f, separators=(",", ":"))
-                if i < total_count - 1: f.write(",")
-            except StopIteration: break
-        f.write(']}}')
+    final_note_count = 0
     
-    if out_path.exists(): out_path.unlink()
-    temp.rename(out_path)
-    print(c(f"File Generated → {out_path.name}", Color.YELLOW))
+    try:
+        with temp.open("w", encoding="utf-8") as f:
+            f.write('{"song":{')
+            meta = [f'"{k}":{json.dumps(v, separators=(",", ":"))}' for k, v in song_obj.items() if k != "notes"]
+            f.write(",".join(meta) + ',"notes":[')
+            
+            for i in range(total_sections):
+                try:
+                    sec = next(sections_iter)
+                    final_note_count += len(sec.get("sectionNotes", []))
+                    json.dump(sec, f, separators=(",", ":"))
+                    if i < total_sections - 1: f.write(",")
+                    
+                    # Small Progress Indicator for large files
+                    if i % 100 == 0 and total_sections > 500:
+                        percent = (i / total_sections) * 100
+                        print(f"\rWriting: {percent:.1f}%", end="", flush=True)
+                        
+                except StopIteration: break
+            
+            f.write(']}}')
+        
+        print("\rWriting: 100%       ") # Clear progress line
+        if out_path.exists(): out_path.unlink()
+        temp.rename(out_path)
+        return final_note_count
+    except Exception as e:
+        print(c(f"\nWrite Error: {e}", Color.RED))
+        return 0
 
 # =========================
-# FIXED CORE FEATURES
+# CORE TASKS
 # =========================
 
-@timer
-def merge_charts_fixed(paths: List[Path]):
-    """Merges multiple JSONs into 1 file and shifts timestamps so they play in order."""
-    if not paths: return
-    charts = [load_json(p) for p in paths if p.exists()]
-    charts = [ch for ch in charts if ch and "song" in ch]
-    if not charts: return
-
-    base_metadata = charts[0]["song"]
+def multiply_task(path: Path, m: int):
+    song = load_json_minimal(path)
+    if not song: return
     
-    def merge_generator():
-        current_offset_ms = 0
-        for ch in charts:
-            song_data = ch["song"]
-            bpm = song_data.get("bpm", 100)
-            sections = song_data.get("notes", [])
-            
-            for sec in sections:
-                new_sec = copy.deepcopy(sec)
-                if "sectionNotes" in new_sec:
-                    for note in new_sec["sectionNotes"]:
-                        note[0] += current_offset_ms # Shift time forward
-                yield new_sec
-            
-            # Update offset for the next song in the merge
-            current_offset_ms += calculate_song_ms(sections, bpm)
-
-    total_sections = sum(len(ch["song"].get("notes", [])) for ch in charts)
-    out_path = paths[0].parent / "MERGED_SONG.json"
-    _write_valid_fnf_json(out_path, base_metadata, merge_generator(), total_sections)
-
-@timer
-def split_chart_fixed(path: Path, parts: int):
-    """Splits a chart into parts instantly without hanging."""
-    chart = load_json(path)
-    if not chart or "song" not in chart: return
+    orig_sections = song.get("notes", [])
+    before_count = count_notes_in_sections(orig_sections)
     
-    sections = chart["song"]["notes"]
-    total = len(sections)
-    chunk_size = math.ceil(total / parts)
+    bpm = song.get("bpm", 100)
+    ms_per_beat = 60000 / bpm
+    loop_ms = sum(s.get("sectionBeats", 4) for s in orig_sections) * ms_per_beat
 
-    for i in range(parts):
-        start = i * chunk_size
-        end = min(start + chunk_size, total)
-        chunk = sections[start:end]
-        
-        if not chunk: break
-        
-        out_path = path.parent / f"{path.stem}_part{i+1}.json"
-        # We pass a simple iterator of the slice to the writer
-        _write_valid_fnf_json(out_path, chart["song"], iter(chunk), len(chunk))
-
-@timer
-def multiply_streaming_fixed(path: Path, multiplier: int):
-    """The fixed multiplier with timestamp offsetting."""
-    chart = load_json(path)
-    if not chart: return
-    
-    orig_sections = chart["song"]["notes"]
-    bpm = chart["song"].get("bpm", 100)
-    loop_ms = calculate_song_ms(orig_sections, bpm)
-    
     def mult_gen():
-        for i in range(multiplier):
+        for i in range(m):
             offset = i * loop_ms
             for sec in orig_sections:
                 new_sec = copy.deepcopy(sec)
                 if "sectionNotes" in new_sec:
-                    for n in new_sec["sectionNotes"]:
-                        n[0] += offset
+                    for note in new_sec["sectionNotes"]:
+                        note[0] += offset
                 yield new_sec
 
-    total_count = len(orig_sections) * multiplier
-    _write_valid_fnf_json(path.parent / f"{path.stem}_x{multiplier}.json", chart["song"], mult_gen(), total_count)
+    print(c(f"\nMultiplying chart x{m}...", Color.MAGENTA))
+    total_secs = len(orig_sections) * m
+    after_count = _write_and_report(path.parent / f"{path.stem}_x{m}.json", song, mult_gen(), total_secs)
+    
+    # --- YOUR REQUESTED SUMMARY ---
+    print(c("=" * 30, Color.YELLOW))
+    print(c(f"Notes Before: {before_count}", Color.CYAN))
+    print(c(f"Notes After : {after_count}", Color.GREEN))
+    print(c("=" * 30, Color.YELLOW))
+    print(c(f"Result: {path.stem}_x{m}.json", Color.RESET))
+
+def merge_task(paths: List[Path]):
+    if not paths: return
+    charts = [load_json_minimal(p) for p in paths if p.exists()]
+    charts = [c for c in charts if c]
+    
+    total_before = sum(count_notes_in_sections(c.get("notes", [])) for c in charts)
+    
+    def merge_gen():
+        offset = 0
+        for ch in charts:
+            bpm = ch.get("bpm", 100)
+            ms_p_b = 60000 / bpm
+            secs = ch.get("notes", [])
+            for s in secs:
+                ns = copy.deepcopy(s)
+                if "sectionNotes" in ns:
+                    for n in ns["sectionNotes"]: n[0] += offset
+                yield ns
+            offset += sum(s.get("sectionBeats", 4) for s in secs) * ms_p_b
+
+    total_secs = sum(len(c.get("notes", [])) for c in charts)
+    print(c(f"\nMerging {len(paths)} charts...", Color.MAGENTA))
+    after = _write_and_report(paths[0].parent / "merged_result.json", charts[0], merge_gen(), total_secs)
+    
+    print(c("=" * 30, Color.YELLOW))
+    print(c(f"Total Notes Before: {total_before}", Color.CYAN))
+    print(c(f"Total Notes After : {after}", Color.GREEN))
+    print(c("=" * 30, Color.YELLOW))
 
 # =========================
-# INTERFACE
+# MAIN MENU
 # =========================
 def main():
     while True:
-        print(c("\n--- FNF TOOL: ULTIMATE REPAIR EDITION ---", Color.MAGENTA))
-        print("1 - Merge (Join multiple JSONs into 1)")
-        print("2 - Split (Divide JSON into parts - FAST)")
-        print("3 - Multiply (Repeat song X times)")
-        print("4 - Compress (Fix Corruption/Metadata)")
+        print(c("\n[ FNF MULTI-TOOL: STREAMING EDITION ]", Color.MAGENTA))
+        print("1 - Multiply (Show Before/After Count)")
+        print("2 - Merge (Combine Multiple Files)")
+        print("3 - Split (Fast Dividing)")
+        print("4 - Repair (Fix JSON Corruption)")
         print("Q - Quit")
         
         choice = input("Select: ").upper().strip()
-        if choice == "Q": break
+        if choice == 'Q': break
         
-        if choice == "1":
-            raw = input("Drop all files here (space separated): ")
-            paths = [clean_path(x) for x in shlex.split(raw)]
-            merge_charts_fixed(paths)
-        elif choice == "2":
-            p = clean_path(input("Path: "))
-            n = int(input("How many parts?: "))
-            split_chart_fixed(p, n)
-        elif choice == "3":
-            p = clean_path(input("Path: "))
-            m = int(input("Multiplier: "))
-            multiply_streaming_fixed(p, m)
-        elif choice == "4":
-            p = clean_path(input("Path: "))
-            ch = load_json(p)
-            if ch: _write_valid_fnf_json(p.parent/f"{p.stem}_fixed.json", ch["song"], iter(ch["song"]["notes"]), len(ch["song"]["notes"]))
+        try:
+            if choice == "1":
+                p = clean_path(input("Drag JSON here: "))
+                m = int(input("Multiplier: "))
+                multiply_task(p, m)
+            elif choice == "2":
+                raw = input("Drag all JSONs here: ")
+                merge_task([clean_path(x) for x in shlex.split(raw)])
+            elif choice == "3":
+                p = clean_path(input("Drag JSON here: "))
+                n = int(input("Parts: "))
+                # Using the existing generator-based repair logic
+                song = load_json_minimal(p)
+                if song:
+                    secs = song.get("notes", [])
+                    chunk = math.ceil(len(secs) / n)
+                    for i in range(n):
+                        sub = secs[i*chunk : (i+1)*chunk]
+                        _write_and_report(p.parent/f"{p.stem}_part{i+1}.json", song, iter(sub), len(sub))
+                    print(c("Split complete!", Color.GREEN))
+            elif choice == "4":
+                p = clean_path(input("Drag JSON here: "))
+                s = load_json_minimal(p)
+                if s: _write_and_report(p.parent/f"{p.stem}_fixed.json", s, iter(s.get("notes", [])), len(s.get("notes", [])))
+        except Exception as e:
+            print(c(f"Critical Error: {e}", Color.RED))
+        gc.collect()
 
 if __name__ == "__main__":
     main()
