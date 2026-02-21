@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
-"""
-FNF multiplier / timestamp shifter — improved and faster.
-
-Usage:
-    python3 fnf_multiplier.py /path/to/chart.json -m 5
-or interactive:
-    python3 fnf_multiplier.py
-"""
-
-import json
-import time
-import argparse
-import os
+import json, copy, time, math, sys, os, shlex
 from pathlib import Path
 from urllib.parse import urlparse, unquote
-from typing import Iterator, List, Dict, Any
+from functools import wraps
+from typing import Union, List, Iterator
 
-# -----------------------
-# Config / ANSI colors
-# -----------------------
-MAX_WARN_SIZE_MB = 500  # warn if input is bigger than this (adjust as needed)
+# =========================
+# CONFIG & COLORS
+# =========================
+MAX_SIZE_MB = 1990 
 
 class Color:
     GREEN = '\033[92m'
@@ -31,227 +20,165 @@ class Color:
 def c(text: str, color: str = Color.RESET) -> str:
     return f"{color}{text}{Color.RESET}"
 
-# -----------------------
-# Helpers
-# -----------------------
-def clean_path(p: str) -> Path:
-    if not p:
-        return Path(".")
-    s = p.strip().strip('"').strip("'")
-    if s.startswith("file://"):
-        s = unquote(urlparse(s).path)
-    return Path(os.path.normpath(os.path.expanduser(os.path.expandvars(s))))
+def timer(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.time()
+        result = func(*args, **kwargs)
+        print(c(f"Done in {time.time() - start:.2f}s\n", Color.GREEN))
+        return result
+    return wrapper
+
+# =========================
+# PATH & IO HELPERS
+# =========================
+def clean_path(p: Union[str, Path, None]) -> Path:
+    if p is None: return Path(".")
+    p = str(p).strip().strip('"').strip("'")
+    if p.startswith("file://"):
+        p = unquote(urlparse(p).path)
+    return Path(os.path.normpath(os.path.expanduser(os.path.expandvars(p))))
 
 def load_json(path: Path):
-    if not path.exists():
+    if not path.exists(): return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(c(f"Error loading JSON: {e}", Color.RED))
         return None
-    # Quick size check (warn)
-    size_mb = path.stat().st_size / (1024 * 1024)
-    if size_mb > MAX_WARN_SIZE_MB:
-        print(c(f"Warning: input is large ({size_mb:.1f} MB). Loading into memory may take time.", Color.YELLOW))
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
 
-def get_bpm(chart: dict) -> float:
-    return float(chart.get("song", {}).get("bpm", chart.get("bpm", 100)))
+def calculate_loop_ms(chart: dict) -> float:
+    """Calculates total duration in ms to offset repeated notes."""
+    bpm = chart["song"].get("bpm", 100)
+    ms_per_beat = 60000 / bpm
+    total_ms = 0
+    for sec in chart["song"]["notes"]:
+        beats = sec.get("sectionBeats", 4)
+        total_ms += beats * ms_per_beat
+    return total_ms
 
-def calculate_chart_duration_ms(chart: dict) -> float:
-    """
-    Estimate total loop duration in ms.
-    If sections include 'sectionBeats', use that (beats * ms_per_beat).
-    Otherwise fallback to looking at max timestamp inside a section if present.
-    Otherwise assume 4 beats per section.
-    """
-    bpm = get_bpm(chart)
-    ms_per_beat = 60000.0 / bpm
-    total_ms = 0.0
-    sections = chart.get("song", {}).get("notes", [])
-    for sec in sections:
-        # Prefer explicit field
-        beats = None
-        if isinstance(sec, dict):
-            beats = sec.get("sectionBeats", None)
-        if beats is not None:
-            total_ms += beats * ms_per_beat
-            continue
-        # Try to infer from timestamps inside sectionNotes
-        timestamps = []
-        if isinstance(sec, dict):
-            notes = sec.get("sectionNotes", [])
-            for n in notes:
-                # note may be list [time, ...] or dict {'time':...}
-                if isinstance(n, (list, tuple)) and len(n) > 0 and isinstance(n[0], (int, float)):
-                    timestamps.append(float(n[0]))
-                elif isinstance(n, dict) and "time" in n:
-                    timestamps.append(float(n["time"]))
-        if timestamps:
-            # duration of this section: max ts - min ts (if they are ms)
-            total_ms += max(timestamps) - min(timestamps)
-        else:
-            # fallback: 4 beats
-            total_ms += 4 * ms_per_beat
-    # Avoid zero
-    return max(total_ms, 1.0)
-
-# -----------------------
-# Core: create adjusted section (fast, minimal copying)
-# -----------------------
-def offset_section(orig_section: Dict[str, Any], offset_ms: float) -> Dict[str, Any]:
-    """
-    Return a *new* section dict with note timestamps shifted by offset_ms.
-    Only copies and modifies the notes array to reduce memory/time.
-    Supports common formats:
-      - section['sectionNotes'] = list of [time, ...] or dicts with 'time'
-      - If structure is different, returns shallow copy unchanged.
-    """
-    if not isinstance(orig_section, dict):
-        # unexpected format: return as-is
-        return orig_section
-
-    sec = dict(orig_section)  # shallow copy of section metadata
-    if "sectionNotes" in orig_section and isinstance(orig_section["sectionNotes"], list):
-        new_notes = []
-        notes = orig_section["sectionNotes"]
-        for n in notes:
-            if isinstance(n, (list, tuple)) and len(n) > 0 and isinstance(n[0], (int, float)):
-                # copy list/tuple, adjust first element (time)
-                ln = list(n)
-                ln[0] = ln[0] + offset_ms
-                new_notes.append(ln)
-            elif isinstance(n, dict) and "time" in n and isinstance(n["time"], (int, float)):
-                nd = dict(n)
-                nd["time"] = nd["time"] + offset_ms
-                new_notes.append(nd)
-            else:
-                # If note format unknown, try leaving it unchanged (safer)
-                new_notes.append(n)
-        sec["sectionNotes"] = new_notes
-    else:
-        # maybe the section *is* a note structure (rare); try common fallback keys
-        # For safety, we don't try to mutate arbitrary structures.
-        pass
-    return sec
-
-def iter_offset_sections(orig_sections: List[Dict[str, Any]], multiplier: int, loop_duration_ms: float) -> Iterator[Dict[str, Any]]:
-    """
-    Yield each section repeated multiplier times with cumulative offsets applied.
-    """
-    for i in range(multiplier):
-        offset = i * loop_duration_ms
-        for sec in orig_sections:
-            yield offset_section(sec, offset)
-
-# -----------------------
-# Streaming writer
-# -----------------------
-def write_chart_streamed(out_path: Path, song_metadata: Dict[str, Any], sections_iter: Iterator[Dict[str, Any]], total_sections: int):
-    """
-    Write output JSON streaming the notes array. This avoids building a giant list in memory.
-    """
-    tmp = out_path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
+# =========================
+# THE FIX: STREAMING & METADATA
+# =========================
+def _write_valid_fnf_json(out_path: Path, metadata: dict, sections_iter: Iterator[dict], total_count: int):
+    """Writes a valid FNF JSON by preserving song metadata and streaming notes."""
+    temp = out_path.with_suffix(".tmp")
+    with temp.open("w", encoding="utf-8") as f:
         f.write('{"song":{')
-        # write metadata except 'notes'
-        meta_items = []
-        for k, v in song_metadata.items():
-            if k == "notes":
-                continue
-            meta_items.append(f'"{k}":{json.dumps(v, separators=(",", ":"))}')
+        # Write all song keys (bpm, speed, etc) except notes
+        meta_items = [f'"{k}":{json.dumps(v)}' for k, v in metadata.items() if k != "notes"]
         f.write(",".join(meta_items))
         f.write(',"notes":[')
-
-        written = 0
-        start_t = time.time()
-        # iterate and dump each section
-        for sec in sections_iter:
-            json.dump(sec, f, separators=(",", ":"))
-            written += 1
-            if written < total_sections:
-                f.write(",")
-            # occasional progress print
-            if written % 500 == 0:
-                elapsed = time.time() - start_t
-                print(c(f"  Written {written}/{total_sections} sections — {elapsed:.1f}s", Color.MAGENTA))
+        
+        for i in range(total_count):
+            try:
+                sec = next(sections_iter)
+                json.dump(sec, f, separators=(",", ":"))
+                if i < total_count - 1: f.write(',')
+            except StopIteration: break
+            
         f.write(']}}')
-
-    # atomic replace
-    tmp.replace(out_path)
+    temp.rename(out_path)
     print(c(f"Saved → {out_path}", Color.YELLOW))
 
-# -----------------------
-# Multiply logic (public)
-# -----------------------
-def multiply_logic(path: Path, multiplier: int, out_dir: Path = None):
-    t0 = time.time()
+# =========================
+# CORE FEATURES
+# =========================
+
+@timer
+def append_notes(path: Path):
     chart = load_json(path)
-    if not chart or "song" not in chart:
-        print(c("Invalid chart format (missing 'song')", Color.RED))
-        return
+    if not chart: return
+    notes_pool = []
+    for sec in chart["song"]["notes"]:
+        if sec.get("sectionNotes"):
+            notes_pool.extend(copy.deepcopy(sec["sectionNotes"]))
+    
+    for sec in chart["song"]["notes"]:
+        if not sec.get("sectionNotes"):
+            sec["sectionNotes"] = copy.deepcopy(notes_pool)
+            
+    _write_valid_fnf_json(path.parent / f"{path.stem}_appended.json", chart["song"], iter(chart["song"]["notes"]), len(chart["song"]["notes"]))
 
-    orig_sections = chart["song"].get("notes", [])
-    if not isinstance(orig_sections, list) or len(orig_sections) == 0:
-        print(c("No sections/notes found in chart.", Color.RED))
-        return
+@timer
+def merge_charts(paths: List[Path]):
+    charts = [load_json(p) for p in paths if p.exists()]
+    if not charts: return
+    base = charts[0]
+    all_sections = []
+    for ch in charts:
+        all_sections.extend(ch["song"]["notes"])
+    
+    _write_valid_fnf_json(paths[0].parent / "merged_chart.json", base["song"], iter(all_sections), len(all_sections))
 
-    loop_ms = calculate_chart_duration_ms(chart)
-    total_sections = len(orig_sections) * multiplier
+@timer
+def split_chart(path: Path, parts: int):
+    chart = load_json(path)
+    if not chart: return
+    notes = chart["song"]["notes"]
+    size = math.ceil(len(notes) / max(parts, 1))
+    for i in range(parts):
+        chunk = notes[i*size : (i+1)*size]
+        if chunk:
+            _write_valid_fnf_json(path.parent / f"{path.stem}_part{i+1}.json", chart["song"], iter(chunk), len(chunk))
 
-    song_metadata = dict(chart["song"])  # shallow copy
-    # remove notes from metadata (we will stream them)
-    song_metadata.pop("notes", None)
+@timer
+def multiply_streaming(path: Path, multiplier: int):
+    chart = load_json(path)
+    if not chart or "song" not in chart: return
+    
+    orig_sections = chart["song"]["notes"]
+    loop_ms = calculate_loop_ms(chart)
+    total_count = len(orig_sections) * multiplier
+    
+    def offset_gen():
+        for i in range(multiplier):
+            ts_offset = i * loop_ms
+            for sec in orig_sections:
+                new_sec = copy.deepcopy(sec)
+                if "sectionNotes" in new_sec:
+                    for n in new_sec["sectionNotes"]:
+                        n[0] += ts_offset # Shift the time!
+                yield new_sec
 
-    out_dir = out_dir or (path.parent / "Multiplied_Charts")
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_name = f"{path.stem}_x{multiplier}.json"
-    out_path = out_dir / out_name
+    _write_valid_fnf_json(path.parent / out_name, chart["song"], offset_gen(), total_count)
 
-    print(c(f"\nMultiplying {len(orig_sections)} sections × {multiplier} → {total_sections} total sections", Color.GREEN))
-    print(c(f"Loop duration ≈ {loop_ms:.0f} ms (BPM: {get_bpm(chart):.2f})", Color.GREEN))
-    print(c(f"Writing to: {out_path}", Color.YELLOW))
-
-    sections_gen = iter_offset_sections(orig_sections, multiplier, loop_ms)
-    write_chart_streamed(out_path, song_metadata, sections_gen, total_sections)
-
-    elapsed = time.time() - t0
-    print(c(f"Done in {elapsed:.2f}s — shifted notes by {loop_ms:.0f}ms per loop.", Color.GREEN))
-
-# -----------------------
-# CLI / interactive
-# -----------------------
+# =========================
+# MENU SYSTEM
+# =========================
 def main():
-    parser = argparse.ArgumentParser(description="FNF chart multiplier / timestamp shifter")
-    parser.add_argument("file", nargs="?", help="path to chart.json (drag & drop allowed)")
-    parser.add_argument("-m", "--multiplier", type=int, default=2, help="how many times to repeat the chart")
-    parser.add_argument("-o", "--outdir", help="output folder (optional)")
-    args = parser.parse_args()
-
-    if args.file:
-        path = clean_path(args.file)
-        if not path.exists():
-            print(c("File not found!", Color.RED))
-            return
-        try:
-            multiply_logic(path, args.multiplier, Path(args.outdir) if args.outdir else None)
-        except Exception as e:
-            print(c(f"Error: {e}", Color.RED))
-    else:
-        # interactive loop
-        print(c("\nFNF MULTIPLIER (drag file, or type Q to quit)\n", Color.MAGENTA))
-        while True:
-            p_input = input("Chart file path (or Q to quit): ").strip()
-            if p_input.upper() == "Q":
-                break
-            path = clean_path(p_input)
-            if not path.exists():
-                print(c("File not found!", Color.RED))
-                continue
-            try:
-                mult = int(input("Multiplier (e.g. 2, 5, 10): ").strip())
-                multiply_logic(path, mult)
-            except ValueError:
-                print(c("Enter a valid number for multiplier!", Color.RED))
-            except Exception as e:
-                print(c(f"Error: {e}", Color.RED))
+    while True:
+        print(c("\n--- FNF MULTITASK TOOL (ALL OPTIONS FIXED) ---", Color.MAGENTA))
+        print("0 - Append (Fill empty sections)")
+        print("1 - Merge (Combine multiple JSONs)")
+        print("2 - Split (Divide chart into parts)")
+        print("3 - Multiply (Safe + Time-Offset)")
+        print("4 - Compress (Compact JSON format)")
+        print("Q - Quit")
+        
+        choice = input("Select: ").upper().strip()
+        
+        if choice == "Q": break
+        
+        if choice in ["0", "2", "3", "4"]:
+            p = clean_path(input("Path to JSON: "))
+            if choice == "0": append_notes(p)
+            elif choice == "2":
+                parts = int(input("Number of parts: "))
+                split_chart(p, parts)
+            elif choice == "3":
+                m = int(input("Multiplier: "))
+                multiply_streaming(p, m)
+            elif choice == "4":
+                chart = load_json(p)
+                if chart: _write_valid_fnf_json(p.parent / f"{p.stem}_compact.json", chart["song"], iter(chart["song"]["notes"]), len(chart["song"]["notes"]))
+        
+        elif choice == "1":
+            raw = input("Paths (space separated): ")
+            paths = [clean_path(x) for x in shlex.split(raw)]
+            merge_charts(paths)
 
 if __name__ == "__main__":
     main()
