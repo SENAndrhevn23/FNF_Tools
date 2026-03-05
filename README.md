@@ -1,4 +1,4 @@
-# Merged Tool (Future Of FNF Charting)
+# Andre's Tools Box (Future Of FNF Charting)
 ## if complicated.. use setup.bat
 A simple Python tool created by Andre Nicholas Jr.
 
