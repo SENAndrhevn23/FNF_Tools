@@ -71,8 +71,24 @@ def get_notes(sec):
 # MERGE
 # =========================
 def merge_task(paths: List[Path]):
-    charts = [load_chart(p) for p in paths]
-    charts = [c for c in charts if c]
+    # expand folders into json files
+    expanded = []
+
+    for p in paths:
+        if p.is_dir():
+            expanded.extend(sorted(p.glob("*.json")))
+        else:
+            expanded.append(p)
+
+    if not expanded:
+        print(c("No files found.", Color.RED))
+        return False
+
+    charts = []
+    for p in expanded:
+        data = load_chart(p)
+        if data:
+            charts.append(data)
 
     if not charts:
         print(c("No valid charts.", Color.RED))
@@ -89,7 +105,8 @@ def merge_task(paths: List[Path]):
 
         for ch in charts:
             secs = ch.get("notes", [])
-            if i >= len(secs): continue
+            if i >= len(secs):
+                continue
 
             sec = secs[i]
 
@@ -122,11 +139,10 @@ def merge_task(paths: List[Path]):
         events.extend(ch.get("events", []))
     base["events"] = events
 
-    out = paths[0].parent / "merged_result.json"
+    out = expanded[0].parent / "merged_result.json"
     save_json(out, base)
 
     return True
-
 # =========================
 # MULTIPLY
 # =========================
