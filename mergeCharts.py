@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json, copy, math, os, shlex, gc
+import json, copy, math, os, gc
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from typing import List
@@ -33,8 +33,7 @@ def load_chart(path: Path):
         return None
     try:
         with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data
+            return json.load(f)
     except Exception as e:
         print(c(f"JSON error: {e}", Color.RED))
         return None
@@ -51,15 +50,6 @@ def save_json(path: Path, data: dict, compress=False):
         except: pass
     temp.rename(path)
 
-def count_notes(chart):
-    total = 0
-    for sec in chart.get("notes", []):
-        if isinstance(sec, dict):
-            total += len(sec.get("sectionNotes", []))
-        elif isinstance(sec, list):
-            total += len(sec)
-    return total
-
 def get_notes(sec):
     if isinstance(sec, dict):
         return sec.get("sectionNotes", [])
@@ -71,9 +61,9 @@ def get_notes(sec):
 # MERGE
 # =========================
 def merge_task(paths: List[Path]):
-    # expand folders into json files
     expanded = []
 
+    # expand folders
     for p in paths:
         if p.is_dir():
             expanded.extend(sorted(p.glob("*.json")))
@@ -143,6 +133,7 @@ def merge_task(paths: List[Path]):
     save_json(out, base)
 
     return True
+
 # =========================
 # MULTIPLY
 # =========================
@@ -221,8 +212,6 @@ def compressor_task(path: Path):
     save_json(out, chart, compress=True)
 
     print(c("Compressed!", Color.GREEN))
-    print(f"Before: {path.stat().st_size:,}")
-    print(f"After : {out.stat().st_size:,}")
 
 # =========================
 # MENU
@@ -246,8 +235,28 @@ def main():
                 multiply_task(p, m)
 
             elif ch == "2":
-                raw = input("Paths: ")
-                merge_task([clean_path(x) for x in shlex.split(raw)])
+                paths = []
+                i = 1
+
+                while True:
+                    user_input = input(f"Enter Json Path {i}: ").strip()
+
+                    if user_input.lower() == "stop":
+                        break
+
+                    if user_input:
+                        paths.append(clean_path(user_input))
+                        i += 1
+
+                if not paths:
+                    print(c("No paths entered.", Color.RED))
+                    continue
+
+                print("merging....")
+                success = merge_task(paths)
+
+                if success:
+                    print("done..")
 
             elif ch == "3":
                 p = clean_path(input("Path: "))
