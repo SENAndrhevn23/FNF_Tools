@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
+# FULL OPTIMIZED FNF TOOL + MEDIA COMPRESSOR
 
-import json, math, os, shlex, gzip
+import json, math, os, shlex, gzip, subprocess, shutil
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from typing import List, Iterator
@@ -9,7 +10,8 @@ from typing import List, Iterator
 # COLORS
 # =========================
 class Color:
-    GREEN='\033[92m'; RED='\033[91m'; YELLOW='\033[93m'; MAGENTA='\033[95m'; CYAN='\033[96m'; RESET='\033[0m'
+    GREEN='\033[92m'; RED='\033[91m'; YELLOW='\033[93m'
+    MAGENTA='\033[95m'; CYAN='\033[96m'; RESET='\033[0m'
 
 def c(t, col=Color.RESET): return f"{col}{t}{Color.RESET}"
 
@@ -22,7 +24,7 @@ def clean_path(p:str)->Path:
     return Path(os.path.normpath(os.path.expanduser(os.path.expandvars(p))))
 
 # =========================
-# LOAD JSON (FAST)
+# LOAD JSON
 # =========================
 def load_json_minimal(path:Path):
     if not path.exists():
@@ -76,7 +78,23 @@ def write_stream(out:Path, base:dict, gen:Iterator, total:int):
     print("\nDone")
 
 # =========================
-# FAST MERGE (FIXED)
+# NOTE COUNT
+# =========================
+def count_notes_task(path: Path):
+    song = load_json_minimal(path)
+    if not song: return
+
+    total_notes = 0
+    for sec in song.get("notes", []):
+        total_notes += len(get_notes(sec))
+
+    print(c("-"*20, Color.CYAN))
+    print(f"Chart: {c(path.name, Color.YELLOW)}")
+    print(f"Total Notes: {c(total_notes, Color.GREEN)}")
+    print(c("-"*20, Color.CYAN))
+
+# =========================
+# MERGE
 # =========================
 def merge_task(paths:List[Path]):
     charts=[load_json_minimal(p) for p in paths]
@@ -87,7 +105,7 @@ def merge_task(paths:List[Path]):
     base=charts[0]
     max_sec=max(len(c.get("notes",[])) for c in charts)
 
-    print(c("FAST MERGE (no deepcopy, optional sort)",Color.CYAN))
+    print(c("FAST MERGE",Color.CYAN))
     do_sort=input("Sort notes? (y/N): ").upper().strip()=="Y"
 
     def gen():
@@ -103,7 +121,7 @@ def merge_task(paths:List[Path]):
                 if template is None:
                     template=dict(sec) if isinstance(sec,dict) else {"sectionNotes":[]}
 
-                combined.extend(get_notes(sec))  # NO COPY
+                combined.extend(get_notes(sec))
 
             if do_sort:
                 combined.sort(key=lambda x:x[0] if isinstance(x,list) else 0)
@@ -142,7 +160,85 @@ def multiply_task(path:Path,m:int):
     write_stream(out,song,gen(),len(secs))
 
 # =========================
-# ADD / REMOVE
+# COMPRESS JSON (OPTIMIZE)
+# =========================
+def compress_task(path: Path):
+    song = load_json_minimal(path)
+    if not song: return
+
+    def optimize_note(n):
+        return [int(x) if isinstance(x, float) and x.is_integer() else x for x in n]
+
+    def optimize():
+        for sec in song.get("notes", []):
+            notes = get_notes(sec)
+            new_notes = [optimize_note(n) for n in notes]
+            if isinstance(sec, dict):
+                s=dict(sec)
+                s["sectionNotes"]=new_notes
+                yield s
+            else:
+                yield new_notes
+
+    out = path.parent / f"{path.stem}_optimized.json"
+    write_stream(out, song, optimize(), len(song.get("notes", [])))
+    print("JSON optimized")
+
+# =========================
+# 🎬 MEDIA COMPRESSOR (NEW)
+# =========================
+def compress_media_task(path: Path):
+    if not path.exists():
+        print(c("File not found", Color.RED))
+        return
+
+    size_before = path.stat().st_size / (1024 * 1024)
+
+    print(c(f"Video Path: {path}", Color.CYAN))
+    print("Compressing...")
+
+    ext = path.suffix.lower()
+
+    if ext in [".mp3", ".wav", ".ogg", ".flac"]:
+        out_file = path.with_suffix(".mp3")
+        cmd = [
+            "ffmpeg","-y","-i",str(path),
+            "-b:a","128k",str(out_file)
+        ]
+    else:
+        out_file = path.with_name(path.stem + "_compressed.mp4")
+        cmd = [
+            "ffmpeg","-y","-i",str(path),
+            "-vcodec","libx264",
+            "-crf","28",
+            "-preset","fast",
+            "-acodec","aac",
+            "-b:a","128k",
+            str(out_file)
+        ]
+
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # simple progress animation
+    i=0
+    while process.poll() is None:
+        i=min(i+2,99)
+        print(f"\rProgress: {i}%", end="")
+        subprocess.run(["sleep","0.05"])
+
+    process.wait()
+
+    if out_file.exists():
+        size_after = out_file.stat().st_size / (1024 * 1024)
+    else:
+        size_after = size_before
+
+    print("\nDone..")
+    print(f"Before: {size_before:.2f} MB")
+    print(f"After:  {size_after:.2f} MB")
+
+# =========================
+# ADD NOTES
 # =========================
 def add_notes_task():
     p=clean_path(input("Path: "))
@@ -152,14 +248,16 @@ def add_notes_task():
     if not song["notes"]:
         song["notes"].append({"sectionNotes":[]})
 
-    song["notes"][0].setdefault("sectionNotes",[]).extend([[0,0]]*n)
+    song["notes"][0].setdefault("sectionNotes",[]).extend([[0,0,0]]*n)
 
     with p.open("w",encoding="utf-8") as f:
         json.dump({"song":song},f,separators=(",",":"))
 
     print("Added")
 
-
+# =========================
+# REMOVE NOTES
+# =========================
 def remove_notes_task():
     p=clean_path(input("Path: "))
     n=int(input("Remove: "))
@@ -197,54 +295,19 @@ def split_task(path:Path,n:int):
         write_stream(path.parent/f"{path.stem}_part{i+1}.json",song,gen(),len(sub))
 
 # =========================
-# COMPRESS
-# =========================
-def compress_task(path: Path):
-    song = load_json_minimal(path)
-    if not song: return
-
-    def optimize_note(n):
-        # shrink floats -> ints when possible
-        return [int(x) if isinstance(x, float) and x.is_integer() else x for x in n]
-
-    def optimize():
-        for sec in song.get("notes", []):
-            notes = get_notes(sec)
-
-            # remove empty sections
-            if not notes:
-                continue
-
-            new_notes = [optimize_note(n) for n in notes]
-
-            if isinstance(sec, dict):
-                s = {}
-                # only keep REQUIRED keys
-                if new_notes:
-                    s["sectionNotes"] = new_notes
-                yield s
-            else:
-                yield new_notes
-
-    out = path.parent / f"{path.stem}_optimized.json"
-
-    # stream write optimized JSON
-    write_stream(out, song, optimize(), len(song.get("notes", [])))
-
-    print("Optimized (real size reduction, still JSON)")
-
-# =========================
 # MENU
 # =========================
 def main():
     while True:
-        print(c("\n[ FAST FNF TOOL ]",Color.MAGENTA))
+        print(c("\n[ FAST FNF TOOL + MEDIA ]",Color.MAGENTA))
         print("1 Merge")
         print("2 Multiply")
         print("3 Split")
-        print("4 Compress")
+        print("4 Compress JSON")
         print("5 Add Notes")
         print("6 Remove Notes")
+        print("7 Count Notes")
+        print("8 Compress Video/Audio")
         print("Q Quit")
 
         ch=input("> ").upper().strip()
@@ -259,7 +322,14 @@ def main():
             split_task(clean_path(input("Path: ")),int(input("Parts: ")))
         elif ch=="4":
             compress_task(clean_path(input("Path: ")))
-        elif ch=="5": add_notes_task()
-        elif ch=="6": remove_notes_task()
+        elif ch=="5":
+            add_notes_task()
+        elif ch=="6":
+            remove_notes_task()
+        elif ch=="7":
+            count_notes_task(clean_path(input("Path: ")))
+        elif ch=="8":
+            compress_media_task(clean_path(input("File Path: ")))
 
-if __name__=="__main__": main()
+if __name__=="__main__":
+    main()
