@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
+import argparse
+import copy
 import json
 import os
+import random
 import shlex
 import subprocess
-import random
-import copy
+import sys
 from pathlib import Path
 from urllib.parse import urlparse, unquote
+
 
 # =========================
 # COLORS
 # =========================
 class Color:
-    GREEN = '\033[92m'
-    RED = '\033[91m'
-    YELLOW = '\033[93m'
-    MAGENTA = '\033[95m'
-    CYAN = '\033[96m'
-    RESET = '\033[0m'
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    MAGENTA = "\033[95m"
+    CYAN = "\033[96m"
+    RESET = "\033[0m"
+
+
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
 def c(text, col=Color.RESET):
+    if not USE_COLOR:
+        return str(text)
     return f"{col}{text}{Color.RESET}"
 
 
@@ -28,10 +36,17 @@ def c(text, col=Color.RESET):
 # HELPERS
 # =========================
 def clean_path(p: str) -> Path:
-    p = p.strip().strip('"').strip("'")
+    p = str(p).strip().strip('"').strip("'")
     if p.startswith("file://"):
         p = unquote(urlparse(p).path)
     return Path(os.path.normpath(os.path.expanduser(os.path.expandvars(p))))
+
+
+def prompt(text: str):
+    try:
+        return input(text)
+    except EOFError:
+        return None
 
 
 def load_json(path: Path):
@@ -70,6 +85,7 @@ def load_chart(path: Path):
 
 
 def save_chart(path: Path, song):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump({"song": song}, f, separators=(",", ":"), ensure_ascii=False)
 
@@ -103,18 +119,23 @@ def pretty_size(num_bytes: int) -> str:
     return f"{num_bytes}b"
 
 
+def default_output(path: Path, suffix: str, ext: str = ".json") -> Path:
+    return path.with_name(f"{path.stem}{suffix}{ext}")
+
+
 # =========================
 # STREAM WRITER (SAFE)
 # =========================
 def write_stream(out: Path, generator, total: int):
-    tmp = out.with_suffix(".tmp")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(out.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         f.write('{"song":{"notes":[')
         for i, sec in enumerate(generator):
-            json.dump(sec, f, separators=(",", ":"))
+            json.dump(sec, f, separators=(",", ":"), ensure_ascii=False)
             if i < total - 1:
                 f.write(",")
-            if i % 50 == 0:
+            if total and i % 50 == 0:
                 print(f"\rProcessing {i}/{total}", end="")
         f.write("]}}")
 
@@ -127,7 +148,7 @@ def write_stream(out: Path, generator, total: int):
 # =========================
 # 1 MERGE
 # =========================
-def merge_task(paths):
+def merge_task(paths, out_path: Path | None = None):
     charts = []
     for p in paths:
         chart = load_chart(p)
@@ -136,9 +157,10 @@ def merge_task(paths):
 
     if not charts:
         print(c("No valid charts loaded.", Color.RED))
-        return
+        return 1
 
     max_len = max(len(chart.get("notes", [])) for chart in charts)
+    out_path = out_path or Path("merged.json")
 
     def gen():
         for i in range(max_len):
@@ -149,41 +171,55 @@ def merge_task(paths):
                     combined += get_notes(notes_arr[i])
             yield {"sectionNotes": combined}
 
-    write_stream(Path("merged.json"), gen(), max_len)
+    write_stream(out_path, gen(), max_len)
+    print(c(f"Saved to: {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
 # 2 MULTIPLY
 # =========================
-def multiply_task(path, mult):
+def multiply_task(path, mult, out_path: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
+        return 1
 
     secs = song.get("notes", [])
+    out_path = out_path or path.with_name(f"{path.stem}_x{mult}.json")
 
     def gen():
         for sec in secs:
             notes = get_notes(sec)
             yield {"sectionNotes": notes * mult}
 
-    write_stream(path.with_name(f"{path.stem}_x{mult}.json"), gen(), len(secs))
+    write_stream(out_path, gen(), len(secs))
+    print(c(f"Saved to: {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
 # 3 SPLIT
 # =========================
-def split_task(path):
+def split_task(path, parts: int | None = None, out_dir: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
+        return 1
 
     secs = song.get("notes", [])
 
-    parts = int(input("How many parts? ").strip())
+    if parts is None:
+        raw = prompt("How many parts? ")
+        if raw is None:
+            print(c("No input available for split parts.", Color.RED))
+            return 1
+        parts = int(raw.strip())
+
     if parts < 2:
         print(c("Must be at least 2 parts.", Color.RED))
-        return
+        return 1
+
+    out_dir = out_dir or path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_size = len(secs) // parts
     remainder = len(secs) % parts
@@ -193,57 +229,71 @@ def split_task(path):
         extra = 1 if i < remainder else 0
         end = start + chunk_size + extra
 
-        out = path.with_name(f"{path.stem}_part{i+1}.json")
+        out = out_dir / f"{path.stem}_part{i+1}.json"
         save_chart(out, {"notes": secs[start:end]})
-
         start = end
 
     print(c(f"Split complete into {parts} parts", Color.GREEN))
+    return 0
 
 
 # =========================
 # 4 MINIFY
 # =========================
-def minify_task(path):
+def minify_task(path, out_path: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
-    save_chart(path.with_name("min.json"), song)
-    print(c("Minified", Color.GREEN))
+        return 1
+    out_path = out_path or path.with_name("min.json")
+    save_chart(out_path, song)
+    print(c(f"Minified -> {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
 # 5 ADD NOTES
 # =========================
-def add_notes_task(path, amount):
+def add_notes_task(path, amount, out_path: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
+        return 1
 
     for sec in song.get("notes", []):
         notes = get_notes(sec)
         for _ in range(amount):
             notes.append([random.randint(0, 200000), random.randint(0, 3), 0])
 
-    save_chart(path.with_name("added.json"), song)
-    print(c("Added notes", Color.GREEN))
+    out_path = out_path or path.with_name("added.json")
+    save_chart(out_path, song)
+    print(c(f"Added notes -> {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
 # 6 REMOVE NOTES
 # =========================
-def remove_notes_task(path):
+def remove_notes_task(path, mode: str | None = None, amt: int | None = None, out_path: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
+        return 1
 
     total = count_notes(song)
-
     print(f"Total Notes: {total:,}")
     print("1 End | 2 Start | 3 Random")
 
-    mode = input("> ").strip()
-    amt = int(input("Amount: ").strip())
+    if mode is None:
+        mode = prompt("> ")
+        if mode is None:
+            print(c("No input available for remove mode.", Color.RED))
+            return 1
+        mode = mode.strip()
+
+    if amt is None:
+        raw_amt = prompt("Amount: ")
+        if raw_amt is None:
+            print(c("No input available for amount.", Color.RED))
+            return 1
+        amt = int(raw_amt.strip())
 
     print("Deleting..")
 
@@ -280,11 +330,17 @@ def remove_notes_task(path):
                     new.append(n)
                 i += 1
             set_notes(sec, new)
+    else:
+        print(c("Invalid mode. Use 1, 2, or 3.", Color.RED))
+        return 1
 
-    save_chart(path.with_name("removed.json"), song)
+    out_path = out_path or path.with_name("removed.json")
+    save_chart(out_path, song)
 
     print("Done..")
     print(f"Notes: {count_notes(song):,}")
+    print(c(f"Saved to: {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
@@ -293,49 +349,70 @@ def remove_notes_task(path):
 def count_task(path):
     song = load_chart(path)
     if not song:
-        return
+        return 1
     print(c(f"Notes: {count_notes(song):,}", Color.GREEN))
+    return 0
 
 
 # =========================
 # 8 MEDIA COMPRESS
 # =========================
-def media_task(path):
-    out = path.with_suffix(".mp3")
-    subprocess.run(["ffmpeg", "-y", "-i", str(path), "-b:a", "128k", str(out)])
-    print(c("Compressed media", Color.GREEN))
+def media_task(path, out_path: Path | None = None, bitrate: str = "128k"):
+    out_path = out_path or path.with_suffix(".mp3")
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path), "-b:a", bitrate, str(out_path)],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print(c("ffmpeg not found on PATH.", Color.RED))
+        return 1
+
+    if result.returncode != 0:
+        print(c("ffmpeg failed.", Color.RED))
+        if result.stderr:
+            print(result.stderr)
+        return result.returncode
+
+    print(c(f"Compressed media -> {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
 # 9 BLOATER
 # =========================
-def bloat_task(path):
+def bloat_task(path, out_path: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
+        return 1
 
     for sec in song.get("notes", []):
         if isinstance(sec, dict):
             sec["bloat"] = "0" * 10000
 
-    save_chart(path.with_name("bloat.json"), song)
-    print(c("Bloated", Color.YELLOW))
+    out_path = out_path or path.with_name("bloat.json")
+    save_chart(out_path, song)
+    print(c(f"Bloated -> {out_path}", Color.YELLOW))
+    return 0
 
 
 # =========================
 # 10 CLEAN
 # =========================
-def clean_task(path):
+def clean_task(path, out_path: Path | None = None):
     song = load_chart(path)
     if not song:
-        return
+        return 1
 
     for sec in song.get("notes", []):
         if isinstance(sec, dict):
             sec.pop("bloat", None)
 
-    save_chart(path.with_name("clean.json"), song)
-    print(c("Cleaned", Color.GREEN))
+    out_path = out_path or path.with_name("clean.json")
+    save_chart(out_path, song)
+    print(c(f"Cleaned -> {out_path}", Color.GREEN))
+    return 0
 
 
 # =========================
@@ -361,7 +438,7 @@ def extract_events_source(data):
     if isinstance(data, dict):
         if isinstance(data.get("events"), list):
             return data["events"]
-        if isinstance(data.get("song"), dict) and isinstance(data["song"].get("events"), list):
+        if isinstance(data.get("song"), dict) and isinstance(data.get("song", {}).get("events"), list):
             return data["song"]["events"]
     return []
 
@@ -427,11 +504,8 @@ def build_multiplier_timeline(events_data):
                 continue
 
             opp_mult, player_mult = parse_side_values(event_row)
-            if opp_mult < 1:
-                opp_mult = 1
-            if player_mult < 1:
-                player_mult = 1
-
+            opp_mult = max(1, opp_mult)
+            player_mult = max(1, player_mult)
             timeline.append((time_val, opp_mult, player_mult))
 
     timeline.sort(key=lambda x: x[0])
@@ -488,19 +562,19 @@ def is_player_section(section):
     return True
 
 
-def real_combo_task(events_path, json_path):
+def real_combo_task(events_path, json_path, out_path: Path | None = None):
     events_data = load_json(events_path)
     if events_data is None:
-        return
+        return 1
 
     song = load_chart(json_path)
     if not song:
-        return
+        return 1
 
     timeline = build_multiplier_timeline(events_data)
     if not timeline:
         print(c("No Change Combo / Note Multiplier events found.", Color.RED))
-        return
+        return 1
 
     before_notes = count_notes(song)
     before_size = json_path.stat().st_size
@@ -536,62 +610,199 @@ def real_combo_task(events_path, json_path):
 
         set_notes(sec, expanded)
 
-    out = json_path.with_name(f"{json_path.stem}_real_notes.json")
-    save_chart(out, new_song)
+    out_path = out_path or json_path.with_name(f"{json_path.stem}_real_notes.json")
+    save_chart(out_path, new_song)
 
     after_notes = count_notes(new_song)
-    after_size = out.stat().st_size
+    after_size = out_path.stat().st_size
 
     print(c("Done", Color.GREEN))
     print(f"Before: {before_notes:,}")
     print(f"After: {after_notes:,}")
     print(f"Size Before: {pretty_size(before_size)}")
     print(f"Size After: {pretty_size(after_size)}")
-    print(f"Saved To: {out}")
+    print(f"Saved To: {out_path}")
+    return 0
 
 
 # =========================
-# MAIN
+# INTERACTIVE MENU
 # =========================
-def main():
+def interactive_menu():
     while True:
         print(c("\n--- FNF TOOL ---", Color.MAGENTA))
         print("1 Merge   2 Multiply   3 Split   4 Minify")
         print("5 Add     6 Remove     7 Count   8 Media")
         print("9 Bloat   10 Clean     11 Real Combos   Q Quit")
 
-        ch = input("> ").upper().strip()
+        ch = prompt("> ")
+        if ch is None:
+            print(c("No interactive input available. Use command-line arguments.", Color.RED))
+            return 1
+
+        ch = ch.upper().strip()
 
         try:
             if ch == "1":
-                merge_task([clean_path(x) for x in shlex.split(input("Paths: "))])
+                raw = prompt("Paths: ")
+                if raw is None:
+                    raise RuntimeError("No paths entered.")
+                merge_task([clean_path(x) for x in shlex.split(raw)])
             elif ch == "2":
-                multiply_task(clean_path(input("Path: ")), int(input("Multiplier: ")))
+                multiply_task(clean_path(prompt("Path: ") or ""), int(prompt("Multiplier: ") or "1"))
             elif ch == "3":
-                split_task(clean_path(input("Path: ")))
+                split_task(clean_path(prompt("Path: ") or ""))
             elif ch == "4":
-                minify_task(clean_path(input("Path: ")))
+                minify_task(clean_path(prompt("Path: ") or ""))
             elif ch == "5":
-                add_notes_task(clean_path(input("Path: ")), int(input("Amount: ")))
+                add_notes_task(clean_path(prompt("Path: ") or ""), int(prompt("Amount: ") or "0"))
             elif ch == "6":
-                remove_notes_task(clean_path(input("Path: ")))
+                remove_notes_task(clean_path(prompt("Path: ") or ""))
             elif ch == "7":
-                count_task(clean_path(input("Path: ")))
+                count_task(clean_path(prompt("Path: ") or ""))
             elif ch == "8":
-                media_task(clean_path(input("File: ")))
+                media_task(clean_path(prompt("File: ") or ""))
             elif ch == "9":
-                bloat_task(clean_path(input("Path: ")))
+                bloat_task(clean_path(prompt("Path: ") or ""))
             elif ch == "10":
-                clean_task(clean_path(input("Path: ")))
+                clean_task(clean_path(prompt("Path: ") or ""))
             elif ch == "11":
-                events_path = clean_path(input("Enter Events Path: "))
-                json_path = clean_path(input("Enter Json Path: "))
+                events_path = clean_path(prompt("Enter Events Path: ") or "")
+                json_path = clean_path(prompt("Enter Json Path: ") or "")
                 real_combo_task(events_path, json_path)
             elif ch == "Q":
-                break
+                return 0
         except Exception as e:
             print(c(f"Error: {e}", Color.RED))
 
 
+# =========================
+# CLI
+# =========================
+def build_parser():
+    p = argparse.ArgumentParser(prog="mergeCharts.py", description="FNF chart utility tool")
+    sub = p.add_subparsers(dest="cmd")
+
+    m = sub.add_parser("merge", help="Merge multiple charts")
+    m.add_argument("paths", nargs="+")
+    m.add_argument("-o", "--out", default="merged.json")
+
+    m = sub.add_parser("multiply", help="Multiply notes in each section")
+    m.add_argument("path")
+    m.add_argument("mult", type=int)
+    m.add_argument("-o", "--out")
+
+    m = sub.add_parser("split", help="Split chart into parts")
+    m.add_argument("path")
+    m.add_argument("--parts", type=int)
+    m.add_argument("-d", "--dir")
+
+    m = sub.add_parser("minify", help="Save chart as min.json")
+    m.add_argument("path")
+    m.add_argument("-o", "--out")
+
+    m = sub.add_parser("add", help="Add random notes")
+    m.add_argument("path")
+    m.add_argument("amount", type=int)
+    m.add_argument("-o", "--out")
+
+    m = sub.add_parser("remove", help="Remove notes")
+    m.add_argument("path")
+    m.add_argument("--mode", choices=["1", "2", "3"])
+    m.add_argument("--amount", type=int)
+    m.add_argument("-o", "--out")
+
+    m = sub.add_parser("count", help="Count notes")
+    m.add_argument("path")
+
+    m = sub.add_parser("media", help="Compress media to mp3")
+    m.add_argument("path")
+    m.add_argument("-o", "--out")
+    m.add_argument("--bitrate", default="128k")
+
+    m = sub.add_parser("bloat", help="Add bloat field to sections")
+    m.add_argument("path")
+    m.add_argument("-o", "--out")
+
+    m = sub.add_parser("clean", help="Remove bloat field from sections")
+    m.add_argument("path")
+    m.add_argument("-o", "--out")
+
+    m = sub.add_parser("real-combos", help="Expand note multipliers into real notes")
+    m.add_argument("events_path")
+    m.add_argument("json_path")
+    m.add_argument("-o", "--out")
+
+    return p
+
+
+def run_cli(args) -> int:
+    if args.cmd == "merge":
+        return merge_task([clean_path(x) for x in args.paths], clean_path(args.out))
+    if args.cmd == "multiply":
+        return multiply_task(clean_path(args.path), args.mult, clean_path(args.out) if args.out else None)
+    if args.cmd == "split":
+        return split_task(
+            clean_path(args.path),
+            args.parts,
+            clean_path(args.dir) if args.dir else None,
+        )
+    if args.cmd == "minify":
+        return minify_task(clean_path(args.path), clean_path(args.out) if args.out else None)
+    if args.cmd == "add":
+        return add_notes_task(clean_path(args.path), args.amount, clean_path(args.out) if args.out else None)
+    if args.cmd == "remove":
+        return remove_notes_task(
+            clean_path(args.path),
+            args.mode,
+            args.amount,
+            clean_path(args.out) if args.out else None,
+        )
+    if args.cmd == "count":
+        return count_task(clean_path(args.path))
+    if args.cmd == "media":
+        return media_task(clean_path(args.path), clean_path(args.out) if args.out else None, args.bitrate)
+    if args.cmd == "bloat":
+        return bloat_task(clean_path(args.path), clean_path(args.out) if args.out else None)
+    if args.cmd == "clean":
+        return clean_task(clean_path(args.path), clean_path(args.out) if args.out else None)
+    if args.cmd == "real-combos":
+        return real_combo_task(
+            clean_path(args.events_path),
+            clean_path(args.json_path),
+            clean_path(args.out) if args.out else None,
+        )
+    return 0
+
+
+# =========================
+# MAIN
+# =========================
+def main():
+    parser = build_parser()
+
+    # No args:
+    # - interactive if attached to a terminal
+    # - otherwise print help and exit cleanly for CI
+    if len(sys.argv) == 1:
+        if sys.stdin.isatty():
+            return interactive_menu()
+        parser.print_help()
+        return 0
+
+    args = parser.parse_args()
+    if not args.cmd:
+        if sys.stdin.isatty():
+            return interactive_menu()
+        parser.print_help()
+        return 2
+
+    try:
+        return run_cli(args)
+    except Exception as e:
+        print(c(f"Error: {e}", Color.RED))
+        return 1
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
