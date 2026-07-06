@@ -1,20 +1,41 @@
 import json
 import os
-import re
 import xml.etree.ElementTree as ET
+import re
+import xml.dom.minidom
 
+def print_header():
+    print("\n" + "=" * 30)
+    print("      FNF ASSET CONVERTER     ")
+    print("=" * 30)
 
-def generate_fnf_json():
-    # 1. Gather inputs
+def main_menu():
+    while True:
+        print_header()
+        print("1: Character Converter")
+        print("2: Noteskin Converter")
+        print("3: Exit")
+        choice = input("\nSelect an option (1-3): ").strip()
+
+        if choice == "1":
+            run_character_converter()
+        elif choice == "2":
+            run_noteskin_converter()
+        elif choice == "3":
+            print("Exiting tool... Goodbye!")
+            break
+        else:
+            print("Invalid choice. Please select 1, 2, or 3.")
+
+# ==========================================
+# 1. CHARACTER CONVERTER (FIXED KEYWORDS)
+# ==========================================
+def run_character_converter():
+    print("\n--- Character Converter ---")
     png_path = input("Enter PNG Path: ").strip()
     xml_path = input("Enter XML Path: ").strip()
 
-    # New inputs for custom name swapping
-    prefix_to_replace = (
-        input("Enter prefix to replace (e.g., BF, BOYFRIEND) [Leave blank to skip]: ")
-        .strip()
-        .upper()
-    )
+    prefix_to_replace = input("Enter prefix to replace (e.g., BF, BOYFRIEND) [Leave blank to skip]: ").strip().upper()
     new_name = input("Enter new character name: ").strip()
 
     if not os.path.exists(xml_path):
@@ -25,99 +46,73 @@ def generate_fnf_json():
     print("It may take a few minutes or seconds")
 
     try:
-        # 2. Parse XML to extract animation names
         tree = ET.parse(xml_path)
         root = tree.getroot()
 
-        # We'll use a set to keep track of unique base animation names
         unique_anim_names = set()
-
         for subtexture in root.findall("SubTexture"):
             name_attr = subtexture.get("name")
             if name_attr:
-                # Remove trailing frame numbers (e.g., "BF HEY0025" -> "BF HEY")
                 base_name = re.sub(r"\d+$", "", name_attr).strip()
                 if base_name:
                     unique_anim_names.add(base_name)
 
-        # 3. Standard game animation keys mapping based on standard prefixes
-        name_mapping = {
-            "BF idle dance": "idle",
-            "BOYFRIEND idle dance": "idle",
-            "BF NOTE LEFT0": "singLEFT",
-            "BOYFRIEND NOTE LEFT0": "singLEFT",
-            "BF NOTE DOWN0": "singDOWN",
-            "BOYFRIEND NOTE DOWN0": "singDOWN",
-            "BF NOTE UP0": "singUP",
-            "BOYFRIEND NOTE UP0": "singUP",
-            "BF NOTE RIGHT0": "singRIGHT",
-            "BOYFRIEND NOTE RIGHT0": "singRIGHT",
-            "BF NOTE LEFT MISS": "singLEFTmiss",
-            "BOYFRIEND NOTE LEFT MISS": "singLEFTmiss",
-            "BF NOTE DOWN MISS": "singDOWNmiss",
-            "BOYFRIEND NOTE DOWN MISS": "singDOWNmiss",
-            "BF NOTE UP MISS": "singUPmiss",
-            "BOYFRIEND NOTE UP MISS": "singUPmiss",
-            "BF NOTE RIGHT MISS": "singRIGHTmiss",
-            "BOYFRIEND NOTE RIGHT MISS": "singRIGHTmiss",
-            "BF HEY": "hey",
-            "BOYFRIEND HEY": "hey",
-            "BF hit": "hurt",
-            "BOYFRIEND hit": "hurt",
-            "BF idle shaking": "scared",
-            "BOYFRIEND idle shaking": "scared",
-            "boyfriend dodge": "dodge",
-            "boyfriend attack": "attack",
-            "bf pre attack": "pre-attack",
-        }
-
         animations_list = []
 
-        # 4. Generate animation entry configs
         for xml_name in sorted(unique_anim_names):
-            # Figure out the proper in-game key (e.g., singLEFT) before we change the name string
-            anim_key = name_mapping.get(xml_name, xml_name)
+            upper_xml = xml_name.upper()
+            anim_key = xml_name
 
-            # --- Name Replacement Step ---
+            # Dynamic keyword check
+            if "MISS" in upper_xml:
+                if "LEFT" in upper_xml: anim_key = "singLEFTmiss"
+                elif "DOWN" in upper_xml: anim_key = "singDOWNmiss"
+                elif "UP" in upper_xml: anim_key = "singUPmiss"
+                elif "RIGHT" in upper_xml: anim_key = "singRIGHTmiss"
+            elif "NOTE" in upper_xml or "SING" in upper_xml:
+                if "LEFT" in upper_xml: anim_key = "singLEFT"
+                elif "DOWN" in upper_xml: anim_key = "singDOWN"
+                elif "UP" in upper_xml: anim_key = "singUP"
+                elif "RIGHT" in upper_xml: anim_key = "singRIGHT"
+            elif "IDLE" in upper_xml or "DANCE" in upper_xml:
+                anim_key = "idle"
+            elif "HEY" in upper_xml or "CHEER" in upper_xml:
+                anim_key = "hey"
+            elif "HIT" in upper_xml or "HURT" in upper_xml:
+                anim_key = "hurt"
+            elif "SCARED" in upper_xml or "SHAKING" in upper_xml:
+                anim_key = "scared"
+            elif "DODGE" in upper_xml:
+                anim_key = "dodge"
+            elif "ATTACK" in upper_xml and "PRE" not in upper_xml:
+                anim_key = "attack"
+            elif "PRE ATTACK" in upper_xml or "PRE-ATTACK" in upper_xml:
+                anim_key = "pre-attack"
+
             final_xml_name = xml_name
             if prefix_to_replace and new_name:
-                # Uses regex to replace the prefix safely, even if case differs
                 pattern = re.compile(re.escape(prefix_to_replace), re.IGNORECASE)
                 final_xml_name = pattern.sub(new_name, xml_name)
-            # -----------------------------
 
-            # Assign default offsets (0,0) to be tweaked later in Psych Engine's editor
             offsets = [0, 0]
+            if anim_key == "idle": offsets = [-5, 0]
+            elif anim_key == "singLEFT": offsets = [5, -6]
+            elif anim_key == "singDOWN": offsets = [-20, -51]
+            elif anim_key == "singUP": offsets = [-46, 27]
+            elif anim_key == "singRIGHT": offsets = [-48, -7]
 
-            # Hardcoded helper offsets mapping based on your example character layout
-            if anim_key == "idle":
-                offsets = [-5, 0]
-            elif anim_key == "singLEFT":
-                offsets = [5, -6]
-            elif anim_key == "singDOWN":
-                offsets = [-20, -51]
-            elif anim_key == "singUP":
-                offsets = [-46, 27]
-            elif anim_key == "singRIGHT":
-                offsets = [-48, -7]
+            loop = True if "scared" in anim_key or "idle" in anim_key else False
 
-            # Determine loop properties
-            loop = True if "shaking" in xml_name.lower() or "idle" in xml_name.lower() else False
-
-            anim_entry = {
+            animations_list.append({
                 "offsets": offsets,
                 "loop": loop,
                 "fps": 24,
                 "anim": anim_key,
                 "indices": [],
-                "name": final_xml_name,  # Uses the newly renamed prefix
-            }
-            animations_list.append(anim_entry)
+                "name": final_xml_name,
+            })
 
-        # Extract filename without extension for asset path configs
         base_file_name = os.path.splitext(os.path.basename(png_path))[0]
-
-        # 5. Build full JSON template structure
         json_data = {
             "animations": animations_list,
             "no_antialiasing": False,
@@ -131,17 +126,87 @@ def generate_fnf_json():
             "scale": 1,
         }
 
-        # 6. Save the output JSON file
         output_json_path = os.path.splitext(xml_path)[0] + ".json"
         with open(output_json_path, "w", encoding="utf-8") as f:
             json.dump(json_data, f, indent=4)
 
         print("Done.")
         print(f"Saved file to: {output_json_path}")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}")
+
+# ==========================================
+# 2. NOTESKIN CONVERTER
+# ==========================================
+def run_noteskin_converter():
+    print("\n--- Noteskin Converter ---")
+    png_path = input("Enter PNG Path: ").strip()
+
+    if not png_path or not os.path.exists(png_path):
+        print("Error: Valid PNG image asset path required.")
+        return
+
+    print("Converting..")
+    print("Making XML..")
+
+    try:
+        # Standard names for layout atlas mapping
+        note_names = [
+            "arrowLEFT0000", "arrowDOWN0000", "arrowRIGHT0000", "arrowUP0000",
+            "blue0000", "green0000", "purple0000", "red0000",
+            "blue hold piece0000", "blue hold end0000",
+            "green hold piece0000", "green hold end0000",
+            "purple hold piece0000", "pruple end hold0000",
+            "red hold piece0000", "red hold end0000",
+            "left press0000", "down press0000", "up press0000", "right press0000",
+            "left confirm0000", "down confirm0000", "up confirm0000", "right confirm0000"
+        ]
+
+        filename = os.path.basename(png_path)
+        
+        # Build TextureAtlas XML Structure
+        root = ET.Element("TextureAtlas", imagePath=filename)
+        root.append(ET.Comment(" Generated automatically via FNF Conversion Tool "))
+
+        # Distribute assets into an automated simple layout matrix tracking position coordinates
+        # Assumed standard block boundary dimensions for dynamic notes skin grids
+        box_w, box_h = 155, 153 
+        columns = 4
+
+        for index, name in enumerate(note_names):
+            col = index % columns
+            row = index // columns
+            
+            x_pos = 2 + (col * (box_w + 5))
+            y_pos = 45 + (row * (box_h + 5))
+
+            # Shrink tracking cuts tailored for thin hold tail segments 
+            if "piece" in name or "end" in name or "hold" in name:
+                width, height = 50, 64
+            else:
+                width, height = box_w, box_h
+
+            sub_texture = ET.SubElement(root, "SubTexture")
+            sub_texture.set("name", name)
+            sub_texture.set("x", str(x_pos))
+            sub_texture.set("y", str(y_pos))
+            sub_texture.set("width", str(width))
+            sub_texture.set("height", str(height))
+
+        # Pretty print writing out the formatting
+        xml_string = ET.tostring(root, encoding="utf-8")
+        parsed_xml = xml.dom.minidom.parseString(xml_string)
+        pretty_xml = parsed_xml.toprettyxml(indent="\t", encoding="utf-8")
+
+        output_xml_path = os.path.splitext(png_path)[0] + ".xml"
+        with open(output_xml_path, "wb") as f:
+            f.write(pretty_xml)
+
+        print("Done.")
+        print(f"Saved XML to: {output_xml_path}")
 
     except Exception as e:
-        print(f"\nAn error occurred while generating the JSON: {e}")
-
+        print(f"\nAn error occurred while generating the XML template layout: {e}")
 
 if __name__ == "__main__":
-    generate_fnf_json()
+    main_menu()
